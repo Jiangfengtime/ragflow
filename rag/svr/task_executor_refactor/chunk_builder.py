@@ -47,6 +47,8 @@ def get_parser(parser_id: str):
     """
     from rag.app import laws, paper, presentation, manual, qa, table, book, resume, picture, naive, one, audio, email, tag
 
+    # parser_id 决定“如何把原文件变成结构化 Chunk”，不是文件后缀的简单映射；
+    # 上传阶段已经根据文件类型和知识库配置选好 parser_id，Worker 在这里取得对应模块。
     factory = {
         "general": naive,
         ParserType.NAIVE.value: naive,
@@ -86,6 +88,7 @@ async def run_chunking(
     """
     st = timer()
     try:
+        # 表格解析允许知识库级字段角色配置覆盖文档配置；普通文档通常保持原 parser_config。
         # Merge table parser config
         parser_config = merge_table_parser_config_from_kb(ctx.raw_task)
 
@@ -93,6 +96,9 @@ async def run_chunking(
         async with ctx.chunk_limiter:
             if on_chunking_start:
                 on_chunking_start(timer() - chunking_wait_started_at)
+            # parser.chunk() 同时完成格式解析/OCR或版面识别（取决于 parser）以及切分。
+            # 返回值仍在内存中，通常包含 content_with_weight、content_ltks、页码和位置，
+            # 此时还没有稳定 Chunk ID、Embedding 向量，也尚未写入 ES。
             cks = await thread_pool_exec(
                 chunker.chunk,
                 ctx.name,

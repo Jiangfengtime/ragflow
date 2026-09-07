@@ -28,6 +28,7 @@ from rag.utils.redis_conn import REDIS_CONN
 class FulltextQueryer(QueryBase):
     def __init__(self):
         self.tw = term_weight.Dealer()
+        # 同义词可从 Redis 缓存读取；它用于扩展 query_string，不会直接查询文档数据。
         self.syn = synonym.Dealer(redis=REDIS_CONN.REDIS if REDIS_CONN.is_alive() else None)
         # 检索字段及权重
         self.query_fields = [
@@ -65,6 +66,7 @@ class FulltextQueryer(QueryBase):
         otxt = txt
         txt = self.rmWWW(txt)
 
+        # 英文/非中文分支：按词构造带权 term，并额外提升相邻双词短语，减少只命中散词的结果。
         if not self.is_chinese(txt):
             txt = self.rmWWW(txt)
             tks = rag_tokenizer.tokenize(txt).split()
@@ -100,6 +102,8 @@ class FulltextQueryer(QueryBase):
             query = " ".join(q)
             return MatchTextExpr(self.query_fields, query, 100, {"original_query": original_query}), keywords
 
+        # 中文分支：同时保留粗粒度词、细粒度词、同义词、精确短语和允许两个位置偏移的
+        # proximity phrase，最终交给 ES query_string；^数字表示该查询项的 boost。
         def need_fine_grained_tokenize(tk):
             if len(tk) < 3:
                 return False
@@ -171,6 +175,8 @@ class FulltextQueryer(QueryBase):
             query = " OR ".join([f"({t})" for t in qs if t])
             if not query:
                 query = otxt
+            # MatchTextExpr 只是后端无关的查询描述；ESConnection 稍后才把它翻译为
+            # query_string，由 Lucene 倒排索引和默认 BM25 真正计算文本 _score。
             return MatchTextExpr(self.query_fields, query, 100, {"minimum_should_match": min_match, "original_query": original_query}), keywords
         return None, keywords
 

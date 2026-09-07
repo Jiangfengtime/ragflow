@@ -525,6 +525,8 @@ async def upload_document(dataset_id, tenant_id):
     #   -> 原文件/缩略图写入对象存储
     #   -> document、file、file2document 等关系写入 MySQL
     # 是否立即解析由前端在上传成功后另行调用 POST /documents/ingest 决定。
+    # 上传成功返回的 document.id 是后续 ingest、Task、Chunk、检索结果贯穿全链路的 doc_id；
+    # 文件名仅用于显示和生成对象 key，不承担关系主键职责。
     # 根据上传类型分流：local=本地文件，web=网页转 PDF，empty=空白文档。
     upload_type = (request.args.get("type") or "local").lower()
 
@@ -713,6 +715,16 @@ async def _upload_local_documents(kb, tenant_id):
         parser_config_override=parser_config_override,
     )
 
+    # 仅记录数量和 ID，不记录文件内容；用于把 HTTP 上传日志与后续 ingest/Task 日志关联。
+    logging.info(
+        "document_upload_completed tenant_id=%s kb_id=%s uploaded=%d failed=%d doc_ids=%s",
+        tenant_id,
+        kb.id,
+        len(files),
+        len(err),
+        [doc["id"] for doc, _ in files],
+    )
+
     # Handle partial success: some files uploaded successfully, some had errors
     is_partial_success = err and files
 
@@ -726,12 +738,16 @@ async def _upload_local_documents(kb, tenant_id):
         logging.error(msg)
         return get_error_data_result(message=msg, code=RetCode.DATA_ERROR)
 
+    # Service 返回 (doc, blob) 是为了供调用链内部复用；HTTP 响应只暴露 Document 元数据，
+    # 原始二进制已经进入对象存储，不能随 JSON 再返回给浏览器。
     files = [f[0] for f in files]  # remove the blob
     return_raw_files = request.args.get("return_raw_files", "false").lower() == "true"
 
     if return_raw_files:
         doc_data = files
     else:
+        # run_status="0" 是上传响应中的“尚未解析”展示值，不表示这里又创建了 Task；
+        # 真正的运行状态会在 /documents/ingest 中由 DocumentService.begin2parse() 更新。
         doc_data = [map_doc_keys_with_run_status(doc, run_status="0") for doc in files]
 
     # For partial success, include error message along with successful uploads
@@ -1512,6 +1528,20 @@ async def ingest(tenant_id):
 
 
 def _run_sync(user_id: str, req):
+    """同步执行 ingest 的任务生产阶段，不执行解析本身。
+
+    对每个 doc_id 依次完成：权限校验 -> 更新 Document 运行状态 -> 可选清理旧 Task/ES Chunk
+    -> 根据 pipeline_id 选择普通 queue_tasks 或自定义 queue_dataflow -> Task 写 MySQL ->
+    消息写 Redis Stream。HTTP 层在线程池中调用本方法，投递完成后即可响应前端。
+    """
+    logging.info(
+        "document_ingest_requested tenant_id=%s run=%s delete=%s apply_kb=%s doc_count=%d",
+        user_id,
+        req.get("run"),
+        bool(req.get("delete")),
+        bool(req.get("apply_kb")),
+        len(req["doc_ids"]),
+    )
     for doc_id in req["doc_ids"]:
         # 权限校验: 查询document表, 找到文档所属kb_id, 检查用户是否能访问这个知识库
         if not DocumentService.accessible(doc_id, user_id):
@@ -1577,8 +1607,17 @@ def _run_sync(user_id: str, req):
                 doc.parser_config["metadata"] = kb.parser_config.get("metadata", {})
                 DocumentService.update_parser_config(doc.id, doc.parser_config)
             doc_dict = doc.to_dict()
-            # 开始进入任务创建流程
+            # 开始进入任务创建流程。这里返回只代表“任务已入库并投递”，不代表解析完成；
+            # 后续状态由 task_executor 通过 TaskService.update_progress() 持续写回 MySQL。
             DocumentService.run(doc_tenant_id, doc_dict, kb_table_num_map)
+            logging.info(
+                "document_ingest_dispatched doc_id=%s kb_id=%s tenant_id=%s parser_id=%s pipeline_id=%s",
+                doc.id,
+                doc.kb_id,
+                doc_tenant_id,
+                doc.parser_id,
+                bool(getattr(doc, "pipeline_id", "")),
+            )
 
     return None, None
 

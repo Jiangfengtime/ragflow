@@ -189,6 +189,8 @@ class ChunkService:
         # Record raw chunks
         self._task_context.recording_context.record("raw_chunks", cks)
 
+        # PDF parser 可能把目录临时放在首个 Chunk 的 __outline__ 中；这里取出并写入
+        # MySQL 文档元数据，避免 __outline__ 作为普通 Chunk 字段进入 ES。
         # Extract outline (delegated)
         await extract_outline(cks, ctx)
 
@@ -199,6 +201,8 @@ class ChunkService:
         # Record docs after prep
         self._task_context.recording_context.record("docs_after_prep", docs)
 
+        # 以下后处理均发生在 Embedding 之前，因为 important_kwd/question_kwd/tag_kwd 等字段
+        # 既会参与最终 ES 文档，也可能影响后续文本拼接与查询排序。是否执行由 parser_config 控制。
         # Post-processing (delegated to chunk_post_processor)
         if ctx.parser_config.get("auto_keywords", 0):
             await extract_keywords(docs, ctx)
@@ -243,6 +247,8 @@ class ChunkService:
             try:
                 d = copy.deepcopy(document)
                 d.update(chunk)
+                # Chunk ID 由“正文+doc_id”稳定计算：同一文档相同内容重跑时得到相同 ID，
+                # ES bulk index 会覆盖该 _id；不同文档即使正文相同也不会冲突。
                 d["id"] = xxhash.xxh64((chunk["content_with_weight"] + str(d["doc_id"])).encode("utf-8", "surrogatepass")).hexdigest()
                 d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
                 d["create_timestamp_flt"] = datetime.now().timestamp()
@@ -256,7 +262,8 @@ class ChunkService:
                     d["img_id"] = ""
                     docs.append(d)
                     return
-                # Chunk 图片写入 MinIO
+                # 只有图片二进制写入 MinIO；Chunk 文本和向量稍后进入 ES。
+                # image2id 会用 kb_id/chunk_id 生成可反查的 img_id，并从 ES 文档中移除大块 image 数据。
                 await image2id(d, partial(settings.STORAGE_IMPL.put, tenant_id=ctx.tenant_id), d["id"], ctx.kb_id)
                 docs.append(d)
             except Exception:
@@ -311,9 +318,19 @@ class ChunkService:
         # 这里才进入 Chunk 的持久化阶段。docs/chunks 在此前始终只存在于 Worker 内存中。
         # docStoreConn 是统一抽象；当前 DOC_ENGINE=elasticsearch 时实际调用 ESConnection.insert。
         doc_bulk_size = doc_bulk_size or settings.DOC_BULK_SIZE
+        logging.info(
+            "chunk_indexing_started task_id=%s doc_id=%s kb_id=%s chunk_count=%d bulk_size=%d",
+            task_id,
+            self._task_context.doc_id,
+            task_dataset_id,
+            len(chunks),
+            doc_bulk_size,
+        )
 
         self._apply_document_availability(chunks)
 
+        # 某些 parser 会产生 mom/mom_with_weight（父级摘要）。父 Chunk 单独写入 doc store，
+        # 子 Chunk 通过 mom_id 关联；父 Chunk available_int=0，不参与普通直接召回。
         # Create mother chunks (summary chunks)
         mothers = self._create_mother_chunks(chunks)
 
@@ -322,7 +339,15 @@ class ChunkService:
             return False
 
         # Insert main chunks
-        return await self._insert_main_chunks(task_id, task_tenant_id, task_dataset_id, chunks, doc_bulk_size)
+        inserted = await self._insert_main_chunks(task_id, task_tenant_id, task_dataset_id, chunks, doc_bulk_size)
+        logging.info(
+            "chunk_indexing_completed task_id=%s doc_id=%s chunk_count=%d success=%s",
+            task_id,
+            self._task_context.doc_id,
+            len(chunks),
+            inserted,
+        )
+        return inserted
 
     def _apply_document_availability(self, chunks: List[Dict[str, Any]]) -> None:
         """Hide source chunks when the owning document is disabled (status=0).
@@ -440,6 +465,7 @@ class ChunkService:
             if b % 128 == 0:
                 self._task_context.progress_cb(prog=0.8 + 0.1 * (b + 1) / len(chunks), msg="")
 
+            # docStoreConn.insert 的约定与常见 API 相反：成功返回空列表，非空列表是失败详情。
             if doc_store_result:
                 error_message = f"Insert chunk error: {doc_store_result}, please check log file and Elasticsearch/Infinity status!"
                 self._task_context.progress_cb(-1, msg=error_message)
@@ -447,6 +473,8 @@ class ChunkService:
 
             batch_end = min(b + doc_bulk_size, len(chunks))
             is_last_batch = batch_end == len(chunks)
+            # 定期把已经成功写入的 Chunk ID 保存到 MySQL Task.chunk_ids：Worker 中途崩溃时
+            # 可识别已完成部分；若 checkpoint 写库失败，则删除本轮已插入 Chunk 保持一致性。
             if is_last_batch or batch_end - last_checkpoint >= checkpoint_batches * doc_bulk_size:
                 chunk_ids = [chunk["id"] for chunk in chunks[:batch_end]]
                 if not await self._update_task_chunk_ids(task_id, chunk_ids):
@@ -456,6 +484,8 @@ class ChunkService:
                     return False
                 last_checkpoint = batch_end
 
+        # 批量写入期间 refresh=False，最后统一 refresh，避免每批刷新 ES segment 的开销；
+        # refresh 完成后新 Chunk 才能稳定地被随后的检索请求看到。
         refresh_idx = getattr(settings.docStoreConn, "refresh_idx", None)
         if callable(refresh_idx):
             await thread_pool_exec(refresh_idx, search.index_name(task_tenant_id))

@@ -596,6 +596,14 @@ class FileService(CommonService):
         Document 通过 ``kb_id/location/thumbnail`` 定位对象存储内容；
         File2Document 负责把文件管理模块中的 file_id 映射到 document_id。
         解析任务由后续 ``POST /documents/ingest`` 创建，而不是由本方法创建。
+
+        Args:
+            kb: Knowledgebase ORM 对象；``kb.id`` 同时是原文件/缩略图的对象存储 bucket。
+            file_objs: Quart ``FileStorage`` 列表；每项提供 filename/read()，可选携带稳定 id。
+            user_id: 当前上传用户/租户，用于文件树和 Document.created_by。
+            src: 文档来源标记，例如 local、web 或连接器来源。
+            parent_path: 可选的对象 key 前缀；会先做路径清洗，不能越出知识库目录。
+            parser_config_override: 仅允许上传表格时覆盖的解析配置，合并后写入 Document。
         """
         root_folder = self.get_root_folder(user_id)
         pf_id = root_folder["id"]
@@ -642,7 +650,8 @@ class FileService(CommonService):
                     new_hash = incoming_fp or xxhash.xxh128(blob).hexdigest()
                     old_hash = doc.content_hash or ""
 
-                    # 将原始二进制写入 MinIO 等对象存储
+                    # 同 doc_id 再次上传时覆盖原对象；只有 content_hash 变化才把该文档加入
+                    # files 返回值，避免内容未变化时触发不必要的后续解析。
                     settings.STORAGE_IMPL.put(kb.id, doc.location, blob, kb.tenant_id)
                     doc.size = len(blob)
                     doc.content_hash = new_hash
@@ -708,10 +717,20 @@ class FileService(CommonService):
                     "content_hash": incoming_fp or xxhash.xxh128(blob).hexdigest()
                 }
 
-                # 先写 document 元数据，再建立文件管理记录和 File2Document 关系。
-                # 从此处开始，doc_id 才能反向解析出原文件的 bucket/object key。
+                # 先写 Document 元数据，再建立文件管理记录和 File2Document 关系。
+                # 关联依赖显式 ID/字段而非文件名：Document.id=doc_id，Document.kb_id/location
+                # 指向对象存储，File2Document.file_id/document_id 连接文件树与知识库文档。
                 DocumentService.insert(doc)
                 FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
+                logger.info(
+                    "document_storage_created doc_id=%s kb_id=%s location=%s type=%s size=%d thumbnail=%s",
+                    doc_id,
+                    kb.id,
+                    location,
+                    filetype,
+                    len(blob),
+                    bool(thumbnail_location),
+                )
                 files.append((doc, blob))
             except Exception as e:  # noqa: BLE001 - collect per-file errors and keep processing the rest
                 err.append(file.filename + ": " + str(e))

@@ -218,6 +218,9 @@ def set_progress(task_id, from_page=0, to_page=-1, prog=None, msg="Processing...
 
 
 # 【链路三：消费 Task】从 Redis Stream 领取任务，再从 MySQL 补齐运行上下文。
+# 返回值中的 redis_msg 用于处理结束后的 XACK；task 是可直接交给 TaskContext 的完整快照。
+# “读到消息”和“任务完成”不是一回事：消息从 XREADGROUP 返回后先进入 Pending，只有外层
+# handle_task 成功、失败或取消的收尾逻辑执行 ack() 后才从消费者组待确认集合移除。
 async def collect():
     global CONSUMER_NAME, DONE_TASKS, FAILED_TASKS
     global UNACKED_ITERATOR
@@ -275,6 +278,16 @@ async def collect():
         logging.warning(f"collect task {msg['id']} {state}")
         redis_msg.ack()
         return None, None
+
+    logging.info(
+        "task_collected task_id=%s doc_id=%s kb_id=%s parser_id=%s from_page=%s to_page=%s",
+        task.get("id"),
+        task.get("doc_id"),
+        task.get("kb_id"),
+        task.get("parser_id"),
+        task.get("from_page"),
+        task.get("to_page"),
+    )
 
     task_type = msg.get("task_type", "")
     task["task_type"] = task_type
@@ -1755,6 +1768,8 @@ async def do_handle_task(task):
 
 async def handle_task():
     global DONE_TASKS, FAILED_TASKS
+    # 单次 handle_task 最多处理一条消息。没有消息时短暂退避并返回，外层主循环会继续创建
+    # 下一次消费；因此在 get_message() 打断点会持续命中，并不表示每次都有业务任务。
     redis_msg, task = await collect() # 从redis获取任务
     if not task:
         await asyncio.sleep(5)
@@ -1779,7 +1794,8 @@ async def handle_task():
             # switch to refactor-ed version
             logging.info(f"-----run refactor-ed task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             set_recording_context(NullRecordingContext())
-            # 处理任务
+            # TaskManager 只负责装配上下文；真正的普通文档流水线位于
+            # TaskHandler._run_standard_chunking_impl()。
             await TaskManager.run_refactored_task(task, chat_limiter, minio_limiter, chunk_limiter, embed_limiter, kg_limiter, set_progress, has_canceled)
         else:  # original version
             logging.info(f"-----run original task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
@@ -1918,7 +1934,8 @@ async def report_status():
 
 async def task_manager():
     try:
-        # 处理任务
+        # 处理一条或一次空轮询；无论成功、失败还是无消息，都必须归还全局 task_limiter，
+        # 否则主循环最终会耗尽并发许可，停止继续消费 Redis。
         await handle_task()
     finally:
         task_limiter.release()

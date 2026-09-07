@@ -190,8 +190,13 @@ class ESConnection(ESConnectionBase):
         agg_fields: list[str] | None = None,
         rank_feature: dict | None = None,
     ):
-        """
-        Refers to https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html
+        """把后端无关的过滤、全文、向量和排序表达式翻译为一次 ES Search 请求。
+
+        MatchTextExpr -> query_string -> Lucene 倒排索引/BM25；
+        MatchDenseExpr -> knn -> dense_vector/HNSW；
+        filter/terms 只限定 kb_id、doc_id、可用状态等范围，不贡献相关性分数。
+        当 query 与 knn 同时存在时 ES 先形成候选；Dealer.retrieval() 随后还会执行
+        第二阶段精确取分与应用层融合，因此这里返回的 _score 不是最终 API similarity。
         """
         if isinstance(index_names, str):
             index_names = index_names.split(",")
@@ -232,6 +237,8 @@ class ESConnection(ESConnectionBase):
 
         s = Search()
         vector_similarity_weight = 0.5
+        # FusionExpr 本身不会作为 JSON 节点发给 ES；这里只读取其中的权重，设置全文 bool
+        # 查询的 boost。KNN 查询则由下面的 MatchDenseExpr 分支单独构造。
         for m in match_expressions:
             if isinstance(m, FusionExpr) and m.method == "weighted_sum" and "weights" in m.fusion_params:
                 assert (
@@ -271,6 +278,7 @@ class ESConnection(ESConnectionBase):
                     similarity=similarity,
                 )
 
+        # 查询标签与 PageRank 被翻译为 should/rank_feature，只负责加分，不会排除无标签 Chunk。
         if bool_query and rank_feature:
             for fld, sc in rank_feature.items():
                 if fld != PAGERANK_FLD:

@@ -23,6 +23,10 @@ export const useHandleUploadDocument = () => {
       tableColumnMode,
       tableColumnRoles,
     }: UploadFormSchemaType) => {
+      // 【前端上传总入口】这是“上传文件”和“启动解析”两次独立 HTTP 请求的编排层：
+      // 1. uploadDocument() 先将 multipart 文件提交到后端，成功后得到 doc_id；
+      // 2. 只有勾选 parseOnCreation（上传后解析）时，才用这些 doc_id 再调用 ingest；
+      // 3. 未勾选时文件仍已保存，用户之后点击解析按钮会复用 useRunDocument() 启动同一链路。
       if (fileList.length > 0) {
         // Build parser_config if column roles are configured
         let parserConfig: Record<string, any> | undefined;
@@ -36,7 +40,7 @@ export const useHandleUploadDocument = () => {
             table_column_roles: tableColumnRoles,
           };
         }
-        // 文件上传
+        // 第一次请求：只上传并创建 Document，不切 Chunk、不生成 Embedding。
         const ret = await uploadDocument(fileList as File[], parserConfig);
 
         // Check for success (code === 0) or partial success (code === 500 with some files)
@@ -47,7 +51,9 @@ export const useHandleUploadDocument = () => {
           return;
         }
 
-        // Trigger parsing for both full and partial success when parseOnCreation is enabled
+        // 第二次请求：POST /api/v1/documents/ingest，run=1 表示开始解析。
+        // 使用服务端返回的 doc_id 关联刚上传的原文件，而不是依赖文件名。
+        // 不 await 不影响后台任务：接口只负责创建 MySQL Task 并投递 Redis，真正解析由 Worker 异步完成。
         if (
           (isSuccess || isPartialSuccess) &&
           parseOnCreation && // 如果开启了文档解析

@@ -1229,6 +1229,11 @@ class DocumentService(CommonService):
         自定义 pipeline 文档进入 queue_dataflow；普通文档先通过 doc_id 查询
         File2Document/Document 得到对象存储地址，再由 queue_tasks 按页或按行拆分任务。
         这里仍然只是在“生产任务”，真正解析由独立 Task Executor 完成。
+
+        Args:
+            tenant_id: 文档所属租户；用于定位 ES 索引与模型配置。
+            doc: Document.to_dict() 结果，至少包含 id/kb_id/parser_id/parser_config/location。
+            kb_table_num_map: 同一次批量 ingest 共享的表格知识库计数缓存，避免重复查库。
         """
         from api.db.services.task_service import queue_dataflow, queue_tasks
         from api.db.services.file2document_service import File2DocumentService
@@ -1244,7 +1249,8 @@ class DocumentService(CommonService):
                 kb_table_num_map[kb_id] = count
                 if kb_table_num_map[kb_id] <= 0:
                     KnowledgebaseService.delete_field_map(kb_id)
-        # 有pipeline_id: 使用自定义 Ingestion Pipeline
+        # 分流点：有 pipeline_id 的文档交给画布定义的 Dataflow；否则走内置 parser。
+        # 两条路径都会先创建持久化 Task，再通过 Redis 唤醒独立 Worker。
         if doc.get("pipeline_id", ""):
             queue_dataflow(tenant_id, flow_id=doc["pipeline_id"], task_id=get_uuid(), doc_id=doc["id"])
         else:

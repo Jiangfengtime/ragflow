@@ -84,13 +84,14 @@ class ActiveEnum(Enum):
 
 
 class LLMType(StrEnum):
-    CHAT = "chat"
-    EMBEDDING = "embedding"
-    ASR = "asr"
-    VISION = "vision"
-    RERANK = "rerank"
-    TTS = "tts"
-    OCR = "ocr"
+    """tenant_model 中模型能力类型；同一供应商可为不同能力保存独立实例和 API Key。"""
+    CHAT = "chat"  # 对话、关键词提取、元数据生成等生成式调用。
+    EMBEDDING = "embedding"  # 文本/查询编码为向量；维度决定 q_{dim}_vec 字段。
+    ASR = "asr"  # 音频转文字。
+    VISION = "vision"  # 图片/视觉理解。
+    RERANK = "rerank"  # 对第一阶段候选 Chunk 打相关性分，参与最终重排。
+    TTS = "tts"  # 文本转语音。
+    OCR = "ocr"  # 图像/PDF 文字识别。
 
 
 class ModelTypeBinary(Enum):
@@ -104,12 +105,13 @@ class ModelTypeBinary(Enum):
 
 
 class TaskStatus(StrEnum):
-    UNSTART = "0" # 未解析
-    RUNNING = "1" # 开始解析
-    CANCEL = "2" # 取消解析
-    DONE = "3" # 解析完成
-    FAIL = "4" # 解析失败
-    SCHEDULE = "5"
+    """Document.run 的展示状态；Task.progress 则记录单个分页任务的细粒度进度。"""
+    UNSTART = "0"  # 文件已上传，但尚未调用 /documents/ingest 创建任务。
+    RUNNING = "1"  # 已入队或正在被 Worker 处理；不代表当前一定占用 CPU。
+    CANCEL = "2"  # 用户请求取消；Worker 检测 Redis 取消标记后停止并清理。
+    DONE = "3"  # 该文档关联的解析任务均成功完成。
+    FAIL = "4"  # 任一关键阶段失败；progress=-1 时由 TaskService 同步写入。
+    SCHEDULE = "5"  # 预留的调度状态。
 
 
 VALID_TASK_STATUS = {TaskStatus.UNSTART, TaskStatus.RUNNING, TaskStatus.CANCEL, TaskStatus.DONE, TaskStatus.FAIL, TaskStatus.SCHEDULE}
@@ -121,21 +123,22 @@ class ConnectorTaskType(StrEnum):
 
 
 class ParserType(StrEnum):
-    PRESENTATION = "presentation"
-    LAWS = "laws"
-    MANUAL = "manual"
-    PAPER = "paper"
-    RESUME = "resume"
-    BOOK = "book"
-    QA = "qa"
-    TABLE = "table"
-    NAIVE = "naive"
-    PICTURE = "picture"
-    ONE = "one"
-    AUDIO = "audio"
-    EMAIL = "email"
-    KG = "knowledge_graph"
-    TAG = "tag"
+    """Document.parser_id；决定 Worker 选择哪个 rag.app.* 模块解析并切分原文件。"""
+    PRESENTATION = "presentation"  # 演示文稿。
+    LAWS = "laws"  # 法律文本。
+    MANUAL = "manual"  # 手册。
+    PAPER = "paper"  # 学术论文。
+    RESUME = "resume"  # 简历；通常进入 resume 队列。
+    BOOK = "book"  # 书籍。
+    QA = "qa"  # 问答对。
+    TABLE = "table"  # 表格；Task 的页范围在此表示行范围。
+    NAIVE = "naive"  # 通用文本/PDF 默认切分器。
+    PICTURE = "picture"  # 图片。
+    ONE = "one"  # 整份文档作为一个 Chunk。
+    AUDIO = "audio"  # 音频。
+    EMAIL = "email"  # 邮件。
+    KG = "knowledge_graph"  # 知识图谱相关的文档解析入口。
+    TAG = "tag"  # 标签知识库；其 tag_kwd 用于普通知识库的标签排序。
 
 
 class FileSource(StrEnum):

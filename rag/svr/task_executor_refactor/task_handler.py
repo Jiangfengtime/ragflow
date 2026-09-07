@@ -184,10 +184,21 @@ class TaskHandler:
 
     @timeout(60 * 60 * 3, 1)
     async def handle(self) -> None:
-        """Handle a document processing task."""
+        """按 task_type 分流任务；普通上传文档最终进入 _run_standard_chunking_impl。"""
         ctx = self._task_context
         task_type = ctx.task_type
         task_id = ctx.id
+
+        logging.info(
+            "task_pipeline_started task_id=%s doc_id=%s kb_id=%s task_type=%s parser_id=%s page_range=[%s,%s)",
+            task_id,
+            ctx.doc_id,
+            ctx.kb_id,
+            task_type or "standard",
+            ctx.parser_id,
+            ctx.from_page,
+            ctx.to_page,
+        )
 
         # Handle memory tasks
         if task_type == "memory":
@@ -199,7 +210,7 @@ class TaskHandler:
                 await handle_save_to_memory_task(ctx.raw_task)
             return
 
-        # Check if task is canceled
+        # 在任何昂贵操作前检查取消标记；处理中各阶段还会重复检查，以便尽快停止并清理。
         if ctx.has_canceled_func(task_id):
             ctx.progress_cb(-1, msg="Task has been canceled.")
             return
@@ -213,6 +224,8 @@ class TaskHandler:
         embedding_model, vector_size = result
 
         with embedding_model:
+            # 索引按 tenant_id 命名、按 kb_id 过滤；向量维度来自实际 Embedding 探测结果。
+            # _init_kb 只创建/校验索引及 mapping，不会在这里写入任何 Chunk。
             self._init_kb(vector_size) # 在解析文档前，确保当前租户对应的文档索引已经存在。
 
             # Handle dataflow tasks (after init_kb, matching original behavior)
@@ -292,8 +305,10 @@ class TaskHandler:
                 await self._run_standard_chunking(embedding_model, vector_size)
 
     def _init_kb(self, vector_size: int) -> None:
-        """Initialize knowledge base index."""
+        """创建或校验当前租户的文档索引及 parser/向量维度相关 mapping。"""
         ctx = self._task_context
+        # 同一租户的多个知识库通常共享 ragflow_{tenant_id} 索引，Chunk 再通过 kb_id 隔离；
+        # create_idx 内部会处理“已存在”情况，因此每个 Task 进入这里不会重复创建数据。
         idxnm = search.index_name(ctx.tenant_id) # 根据租户 ID 生成索引名
         parser_id = ctx.parser_id
         # Create index if not exists
@@ -578,12 +593,19 @@ class TaskHandler:
         # 6. 最后一个分页 Task 执行文档级收尾，然后由外层对 Redis 消息 XACK。
 
         # File2DocumentService 将 doc_id 转换成对象存储 bucket/object key。
+        # 此处读取的是上传阶段保存的完整原文件；Chunk 文本不从 MinIO 读取。
         bucket, name = File2DocumentService.get_storage_address(doc_id=ctx.doc_id)
         binary = await self._get_storage_binary(bucket, name)
         if binary is None:
             raise FileNotFoundError(f"Can not find file <{ctx.name}> from minio. Could you try it again.")
         # build_chunks 返回的是尚未生成向量、尚未写入 ES 的内存对象。
         chunks = await chunk_service.build_chunks(binary, on_chunking_start)
+        logging.info(
+            "task_chunks_built task_id=%s doc_id=%s chunk_count=%d",
+            task_id,
+            task_doc_id,
+            len(chunks),
+        )
         ctx.recording_context.record("chunks", chunks)
         chunk_ids = [c.get("id") for c in chunks if isinstance(c, dict) and "id" in c]
         ctx.recording_context.record("chunk_ids_count", len(chunk_ids))
@@ -622,6 +644,15 @@ class TaskHandler:
             logging.exception(error_message)
             raise
 
+        logging.info(
+            "task_embedding_completed task_id=%s doc_id=%s chunk_count=%d token_count=%d vector_size=%d",
+            task_id,
+            task_doc_id,
+            len(chunks),
+            token_count,
+            vector_size,
+        )
+
         ctx.recording_context.record("token_count", token_count)
         ctx.recording_context.record("vector_size", vector_size)
         progress_message = "Embedding chunks ({:.2f}s)".format(timer() - start_ts)
@@ -652,7 +683,16 @@ class TaskHandler:
             abort_doc_chunking_counter(task_doc_id)
             return
         ctx.recording_context.record("insertion_result", "success")
+        logging.info(
+            "task_chunks_indexed task_id=%s doc_id=%s kb_id=%s chunk_count=%d",
+            task_id,
+            task_doc_id,
+            task_dataset_id,
+            chunk_count,
+        )
 
+        # ES 已写成功后处理表格元数据；TOC 解析可与 Embedding/索引并行，完成后作为独立
+        # TOC Chunk 再写入 doc store。普通 Chunk 的主写入不会等待 TOC 生成才开始。
         # Post-processing
         post_processor = PostProcessor(ctx=ctx)
         await post_processor.process_table_parser_metadata(task_doc_id, chunks)
@@ -669,6 +709,8 @@ class TaskHandler:
             ctx.progress_cb(-1, msg="Task has been canceled.")
             return
 
+        # Task.progress/chunk_ids 与 Document.chunk_num/token_num 是两层状态：前者描述当前分页
+        # Task，后者累加整份文档统计；一个 PDF 的多个 Task 都会贡献到同一 Document。
         # Update document stats
         if ctx.write_interceptor:
             ctx.write_interceptor.intercept("DocumentService.increment_chunk_num")

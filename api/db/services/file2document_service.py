@@ -81,6 +81,12 @@ class File2DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_storage_address(cls, doc_id=None, file_id=None):
+        """把业务 doc_id/file_id 解析成对象存储的 (bucket, object_key)。
+
+        文件管理器的 LOCAL 文件沿 File2Document -> File 读取 parent_id/location；知识库上传
+        （FileSource.KNOWLEDGEBASE）及连接器来源回退到 Document.kb_id/location。整个关联
+        依赖数据库 ID，不通过文件名进行模糊匹配。
+        """
         if doc_id:
             f2d = cls.get_by_document_id(doc_id)
         else:

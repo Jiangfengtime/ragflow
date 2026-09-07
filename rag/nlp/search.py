@@ -47,6 +47,8 @@ def index_name(uid):
 
 class Dealer:
     def __init__(self, dataStore: DocStoreConnection):
+        # dataStore 是统一文档引擎连接。使用 ES 时，文本字段走倒排索引，q_*_vec 走 HNSW
+        # 向量索引，但两者命中的都是同一个以 Chunk ID 为 _id 的 ES 文档。
         self.qryr = query.FulltextQueryer()
         self.dataStore = dataStore
 
@@ -166,6 +168,7 @@ class Dealer:
         knn_top_k = int(req.get("knn_top_k", 1024))
         knn_num_candidates = int(req.get("knn_num_candidates", 2048))
 
+        # src 控制从 doc store 取回哪些字段；ES 主召回刻意不取 q_*_vec，降低网络与内存开销。
         src = req.get(
             "fields",
             [
@@ -302,6 +305,8 @@ class Dealer:
         keywords = list(kwds)
         highlight = self.dataStore.get_highlight(res, keywords, "content_with_weight")
         aggs = self.dataStore.get_aggregation(res, "docnm_kwd")
+        # SearchResult 保持 ids 顺序与 field[id] 一一对应；后续所有 tksim/vtsim/sim 数组
+        # 都依赖这个顺序对齐，不能在重排前单独排序 field。
         return self.SearchResult(total=total, ids=ids, query_vector=q_vec, aggregation=aggs, highlight=highlight, field=self.dataStore.get_fields(res, src + ["_score"]), keywords=keywords)
 
     @staticmethod
@@ -637,6 +642,15 @@ class Dealer:
         knn_num_candidates=2048,  # Advanced knn parameter
     ):
         """
+        两阶段混合检索：search() 先从 doc store 快速召回候选；随后按后端能力取得
+        独立向量分数并在应用层重排。ES 默认路径的最终文本分数是 token_similarity，
+        不是直接复用第一阶段 Lucene BM25 _score。
+
+        关键入参：``tenant_ids`` 决定 ragflow_{tenant_id} 索引，``kb_ids`` 是索引内过滤；
+        ``page/page_size`` 仅用于最终结果分页，``rerank_candidates_count`` 是先取回并重排的
+        候选窗口；``vector_similarity_weight`` 同时决定最终向量分数权重和全文最低匹配策略；
+        ``rank_feature`` 是标签/PageRank 加分，``rerank_mdl`` 存在时替换最终的向量相似度项。
+
         Pagination is neither efficient nor reliable for this retrieval when rerank is enabled because the system must:
           - Retrieve more rerank candidates than the requested page_size.
           - Rerank those records to calculate similarity scores.
@@ -689,6 +703,14 @@ class Dealer:
 
         # 调用search()进行第一阶段召回
         sres = await self.search(req, idx_names, kb_ids, embd_mdl, highlight, rank_feature=rank_feature, min_match=min_match)
+        logging.info(
+            "retrieval_candidates trace_id=%s indexes=%s kb_count=%d candidate_count=%d min_match=%s",
+            trace_id or "-",
+            idx_names,
+            len(kb_ids),
+            sres.total,
+            min_match,
+        )
         # Temporary retrieval-side guard: prune chunks whose parent document no
         # longer exists before reranking and returning results.
 
@@ -796,6 +818,17 @@ class Dealer:
         begin = (page - 1) * page_size
         end = begin + page_size
         page_idx = valid_idx[begin:end]
+
+        logging.info(
+            "retrieval_ranked trace_id=%s candidate_count=%d valid_count=%d page=%d page_size=%d returned_count=%d rerank=%s",
+            trace_id or "-",
+            sres.total,
+            filtered_count,
+            page,
+            page_size,
+            len(page_idx),
+            bool(rerank_mdl),
+        )
 
         dim = len(sres.query_vector)
         vector_column = f"q_{dim}_vec"

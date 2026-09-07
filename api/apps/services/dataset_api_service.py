@@ -1423,6 +1423,11 @@ async def search_datasets(tenant_id: str, req: dict):
     """
     Search (retrieval test) across multiple datasets.
 
+    查询主链路（这里只返回相关 Chunk，不负责调用 Chat 模型生成最终答案）：
+    请求校验/权限 -> 元数据缩小 doc_id 范围 -> 跨语言/关键词扩展 -> 绑定 Embedding
+    与可选 Rerank -> 生成查询标签 -> Dealer.retrieval(BM25+KNN+重排) -> 可选 GraphRAG
+    补充 -> 子 Chunk 替换/展开 -> 移除向量后返回前端。
+
     :param tenant_id: tenant ID
     :param req: search request containing dataset_ids and other params
     :return: (success, result) or (success, error_message)
@@ -1522,6 +1527,8 @@ async def search_datasets(tenant_id: str, req: dict):
     if meta_data_filter:
         logging.debug("Metadata filter applied: %s, question length: %d, chat_mdl=%s", meta_data_filter, len(question), "None" if chat_mdl is None else "configured")
         # 元数据过滤
+        # 元数据过滤先在 MySQL 元数据层得到允许的 doc_id，随后把这些 ID 作为 ES filter；
+        # 它不是相关性打分的一部分，而是在召回前缩小搜索空间。
         local_doc_ids = await apply_meta_data_filter(
             meta_data_filter,
             None,
@@ -1545,7 +1552,7 @@ async def search_datasets(tenant_id: str, req: dict):
     kb = kbs[0]
     _question = question
     if langs:
-        # 将问题翻译成指定语言,然后拼接在一起
+        # 将问题翻译成每个指定语言并与原问题拼接为一个检索字符串；不是分别执行多次 retrieval。
         _question = await cross_languages(kb.tenant_id, None, _question, langs)
 
     embd_mdl = None
@@ -1569,8 +1576,23 @@ async def search_datasets(tenant_id: str, req: dict):
         chat_mdl = LLMBundle(kb.tenant_id, default_chat_model_config)
         _question += await keyword_extraction(chat_mdl, _question)
 
-    # 给用户问题提取“标签特征”，供后续检索排序使用
+    # 从配置的标签知识库中通过全文搜索聚合 top-N 标签；labels 会作为 rank_feature
+    # 同时影响 ES 第一阶段候选排序和 Python 第二阶段最终加分，不是硬过滤条件。
     labels = label_question(_question, kbs)
+
+    # 不记录问题原文、向量或 Chunk 正文，避免把用户数据写入常规服务日志；search_id 可用于
+    # 将入口、Dealer.retrieval 和最终返回日志关联起来。
+    logging.info(
+        "dataset_retrieval_started search_id=%s tenant_id=%s kb_ids=%s doc_filter_count=%d question_len=%d vector_weight=%.3f rerank=%s labels=%d",
+        search_id or "-",
+        tenant_id,
+        kb_ids,
+        len(local_doc_ids),
+        len(_question),
+        vector_similarity_weight,
+        bool(rerank_mdl),
+        len(labels or {}),
+    )
 
     # 召回
     ranks = await settings.retriever.retrieval(
@@ -1593,6 +1615,8 @@ async def search_datasets(tenant_id: str, req: dict):
     )
 
     if use_kg:
+        # GraphRAG 是标准 Chunk 召回之后的额外独立检索；成功时把图检索结果插到首位，
+        # 失败只记录日志，不影响已得到的普通 BM25/KNN 结果。
         try:
             default_chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
             ck = await settings.kg_retriever.retrieval(_question, tenant_ids, kb_ids, embd_mdl, LLMBundle(kb.tenant_id, default_chat_model_config))
@@ -1600,11 +1624,21 @@ async def search_datasets(tenant_id: str, req: dict):
                 ranks["chunks"].insert(0, ck)
         except Exception:
             logging.warning("search_datasets KG retrieval failed: datasets=%s tenant=%s", kb_ids, tenant_id, exc_info=True)
+    # 若命中母 Chunk/层级 Chunk，根据 mom_id 等关系转换为最终可展示的子 Chunk。
     ranks["chunks"] = settings.retriever.retrieval_by_children(ranks["chunks"], tenant_ids)
 
+    # 查询向量只供服务端后续引用计算使用，API 返回前移除，避免响应体过大和暴露内部向量。
     for c in ranks["chunks"]:
         c.pop("vector", None)
     ranks["labels"] = labels
+
+    logging.info(
+        "dataset_retrieval_completed search_id=%s kb_ids=%s total=%d returned_chunks=%d",
+        search_id or "-",
+        kb_ids,
+        ranks.get("total", 0),
+        len(ranks["chunks"]),
+    )
 
     return True, ranks
 

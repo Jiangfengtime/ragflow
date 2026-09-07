@@ -504,6 +504,8 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         # 如果是mineru, 则不拆分
         if doc["parser_id"] in ["one", "knowledge_graph"] or doc["parser_config"].get("toc_extraction", False) or is_mineru:
             page_size = MAXIMUM_TASK_PAGE_NUMBER
+        # parser_config.pages 是面向用户的 1-based 闭区间；Task 保存的是供 Python 切片使用的
+        # 0-based [from_page, to_page) 半开区间，解析器只处理自己负责的页面。
         page_ranges = doc["parser_config"].get("pages") or [(1, MAXIMUM_PAGE_NUMBER)]
         for s, e in page_ranges:
             s -= 1
@@ -516,6 +518,8 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
                 parse_task_array.append(task)
 
     elif doc["parser_id"] == "table":
+        # 表格解析把行号复用在 from_page/to_page 字段中，每 3000 行一个 Task。
+        # 字段名虽然叫 page，但对 table parser 表示行范围。
         file_bin = settings.STORAGE_IMPL.get(bucket, name)
         rn = RAGFlowExcelParser.row_number(doc["name"], file_bin)
         for i in range(0, rn, 3000):
@@ -549,6 +553,8 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     prev_tasks = TaskService.get_tasks(doc["id"])
     ck_num = 0
     if prev_tasks:
+        # 重跑时先尝试按 digest+页范围复用已完成 Task 的 Chunk；不能复用的旧 Chunk
+        # 会从 doc store 删除，再以本次新任务重新生成，避免同一文档残留新旧版本。
         for task in parse_task_array:
             ck_num += reuse_prev_task_chunks(task, prev_tasks, chunking_config)
         TaskService.filter_delete([Task.doc_id == doc["id"]])
@@ -565,16 +571,33 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     bulk_insert_into_db(Task, parse_task_array, True)
     DocumentService.begin2parse(doc["id"])  # 将 document 更新为“排队/解析中”。
 
+    # 已复用的 Task progress=1，不需要再次进入 Redis；只有未完成任务才投递给 Worker。
     unfinished_task_array = [task for task in parse_task_array if task["progress"] < 1.0]
     chunking_n = sum(1 for task in unfinished_task_array if not task.get("task_type"))
     if chunking_n > 0:
         # 同一文档可能被拆成多个 Task。Redis 计数器记录还有多少分页任务未结束，
         # 只有最后一个 Task 才负责执行文档级收尾流程。
         assert seed_doc_chunking_counter(doc["id"], chunking_n), "Can't access Redis. Please check the Redis' status."
+    logging.info(
+        "document_tasks_created doc_id=%s kb_id=%s parser_id=%s task_total=%d task_pending=%d priority=%s queue_suffix=%s",
+        doc["id"],
+        doc.get("kb_id"),
+        doc.get("parser_id"),
+        len(parse_task_array),
+        len(unfinished_task_array),
+        priority,
+        suffix,
+    )
     try:
         for unfinished_task in unfinished_task_array:
             # XADD 到 Redis Stream。投递成功不代表解析完成，只代表任务可以被消费者组领取。
             assert REDIS_CONN.queue_product(settings.get_svr_queue_name(priority, suffix), message=unfinished_task), "Can't access Redis. Please check the Redis' status."
+        logging.info(
+            "document_tasks_enqueued doc_id=%s queue=%s task_ids=%s",
+            doc["id"],
+            settings.get_svr_queue_name(priority, suffix),
+            [task["id"] for task in unfinished_task_array],
+        )
     except Exception:
         abort_doc_chunking_counter(doc["id"])
         raise

@@ -105,6 +105,8 @@ class TaskManager:
 
             # TaskHandler 通过 ctx 读取任务字段并使用绑定过 task_id/page range 的 progress_cb，
             # 因而下游服务无需反复传递大量独立参数。
+            # 从这里开始，后续组件通过同一个 ctx 取得 doc_id、页范围、模型配置、限流器、
+            # 取消函数和进度回调，避免各阶段反复传递大量独立参数。
             handler = TaskHandler(ctx=task_context, billing_hook=billing_hook)
             await handler.handle_task()  # 真正的业务处理入口。
 

@@ -123,13 +123,13 @@ class TaskDict(TypedDict, total=False):
     """Tenant model ID for embedding (id in tenant_model table)."""
 
     from_page: int
-    """Starting page number for processing (0-based)."""
+    """起始页/行，0-based 且包含；table parser 中表示起始行。"""
 
     to_page: int
-    """Ending page number for processing (-1 means all pages)."""
+    """结束页/行，0-based 且不包含；通常与 from_page 组成 [from_page, to_page)。"""
 
     task_type: str
-    """Task type (e.g., 'dataflow', 'raptor', 'graphrag', 'memory')."""
+    """任务分流类型；空字符串通常是普通文档解析，dataflow/raptor/graphrag 等进入专用分支。"""
 
     dataflow_id: str
     """Dataflow/pipeline identifier."""

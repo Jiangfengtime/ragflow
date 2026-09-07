@@ -1173,6 +1173,9 @@ async def run_document_post_chunking_if_last(
 
     chunking_aborted = is_doc_chunking_aborted(task_doc_id)
     remaining_chunking_tasks = 0 if ctx.write_interceptor else credit_doc_chunking_task(task_doc_id, task_id)
+    # 一个 PDF 可拆成多个并行 Task。Redis 文档级计数器每完成一个分页 Task 减一；
+    # 非最后一个 Task 只结束自身，只有减到 0 的 Task 才执行一次文档级结构编译/RAPTOR，
+    # 防止每个页段重复生成整份文档的衍生数据。
     if remaining_chunking_tasks != 0:
         if chunking_aborted:
             logging.info(

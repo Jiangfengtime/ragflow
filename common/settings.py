@@ -475,6 +475,8 @@ def init_settings():
         STORAGE_IMPL = storage_impl
 
     global retriever, kg_retriever
+    # retriever 不是另一套存储：Dealer 持有同一个 docStoreConn。当前配置为 ES 时，
+    # 全文 query_string 与 dense_vector KNN 都最终进入 ESConnection.search()。
     retriever = search.Dealer(docStoreConn)
     from rag.graphrag import search as kg_search
 

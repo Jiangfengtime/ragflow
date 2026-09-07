@@ -108,6 +108,8 @@ class EmbeddingService:
         # Stack vectors using EmbeddingUtils
         cnts = EmbeddingUtils.stack_vectors(vects_batches)
 
+        # 最终每个 Chunk 的向量是“文件名向量”和“正文向量”的加权组合，不是简单拼接；
+        # filename_embd_weight 越大，查询命中文件名语义时该文档越容易被向量召回。
         # Combine title and content vectors using EmbeddingUtils
         title_weight = parser_config.get("filename_embd_weight", EmbeddingUtils.DEFAULT_TITLE_WEIGHT)
         vects = EmbeddingUtils.combine_title_content_vectors(tts, cnts, title_weight)
@@ -115,6 +117,8 @@ class EmbeddingService:
         assert len(vects) == len(docs)
 
         # 将最终向量附加回每个 docs 元素，字段名包含维度，例如 q_1024_vec。
+        # 同一个 ES Chunk 因此同时拥有倒排索引字段（content_ltks 等）和 dense_vector 字段，
+        # 后续 BM25 与 KNN 虽查询同一条记录，但使用的是两套不同索引结构。
         # 随后 TaskHandler 才会调用 ChunkService.insert_chunks 将其写入 ES。
         vector_size = EmbeddingUtils.attach_vectors(docs, vects)
 

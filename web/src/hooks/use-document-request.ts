@@ -364,7 +364,8 @@ export const useSetDocumentStatus = () => {
   return { setDocumentStatus: mutateAsync, data, loading };
 };
 
-// This hook is used to run a document by its IDs
+// 【前端解析控制入口】上传后自动解析、手动开始、停止以及重新解析最终都调用这里。
+// run=1：开始/重新开始；run=2：取消（具体枚举以 RunningStatus/后端 TaskStatus 为准）。
 export const useRunDocument = () => {
   const queryClient = useQueryClient();
 
@@ -384,6 +385,8 @@ export const useRunDocument = () => {
       option?: { delete: boolean; apply_kb: boolean };
     }) => {
       if (run === 1) {
+        // 这里只是先把 React Query 缓存乐观更新为“解析中”，让页面立即开始轮询；
+        // 真正的 document.run/progress 状态由下面的 ingest 接口写入 MySQL。
         const documentIdSet = new Set(documentIds);
         queryClient.setQueriesData<{
           docs: IDocumentInfo[];
@@ -414,6 +417,8 @@ export const useRunDocument = () => {
           queryKey: DocumentKeys.all(),
         });
       }
+      // POST /api/v1/documents/ingest：后端同步完成权限校验、旧结果清理（可选）、
+      // Task 入库和 Redis 投递后即返回；文件解析与 ES 写入在独立 task_executor 进程中继续。
       const ret = await kbService.documentIngest({ // 文档解析
         doc_ids: documentIds,
         run,
@@ -457,6 +462,8 @@ export const useRunDocument = () => {
         run: params.run,
         option: params.option || null,
       });
+      // 防止用户双击或多个组件在同一时刻对同一组文档重复提交 ingest 请求。
+      // 这里只合并“仍在飞行中的相同请求”，请求结束后允许正常重新解析。
       const existingRequest = documentIngestInFlight.get(key);
       if (existingRequest) {
         return existingRequest;
