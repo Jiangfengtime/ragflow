@@ -76,6 +76,7 @@ def validate_dataset_embedding_models(kbs):
         return "Cannot search across datasets where some have embedding models and others do not."
     if has_embd:
         candidates = []
+        # 遍历知识库
         for kb in kbs:
             if not kb.embd_id:
                 continue
@@ -89,6 +90,7 @@ def validate_dataset_embedding_models(kbs):
         except Exception:  # noqa: BLE001 - resolution is best-effort; unresolvable ids keep their raw value
             resolved_names = {}
         embd_nms = {_kb_embedding_base_name(kb, resolved_names) for kb in kbs if kb.embd_id}
+        # 如果不同数据集的embedding不一样, 则拦截
         if len(embd_nms) > 1:
             return f"Datasets use different embedding models: {[kb.embd_id for kb in kbs]}"
     return None

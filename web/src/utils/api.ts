@@ -272,7 +272,7 @@ export default {
     `${restAPIv1}/datasets/${datasetId}/documents`,
   documentRename: (datasetId: string, documentId: string) =>
     `${restAPIv1}/datasets/${datasetId}/documents/${documentId}`,
-  documentIngest: `${restAPIv1}/documents/ingest`,
+  documentIngest: `${restAPIv1}/documents/ingest`, // 文档解析链接
   documentCreate: (datasetId: string) =>
     `${restAPIv1}/datasets/${datasetId}/documents?type=empty`,
   documentChangeParser: (datasetId: string, documentId: string) =>

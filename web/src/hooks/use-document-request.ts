@@ -414,7 +414,7 @@ export const useRunDocument = () => {
           queryKey: DocumentKeys.all(),
         });
       }
-      const ret = await kbService.documentIngest({
+      const ret = await kbService.documentIngest({ // 文档解析
         doc_ids: documentIds,
         run,
         ...(option || {}),

@@ -131,9 +131,11 @@ if __name__ == "__main__":
     if RuntimeConfig.DEBUG:
         logging.info("run on debug mode")
 
+    # 初始化运行环境
     RuntimeConfig.init_env()
     RuntimeConfig.init_config(JOB_SERVER_HOST=settings.HOST_IP, HTTP_PORT=settings.HOST_PORT)
 
+    # 加载插件
     GlobalPluginManager.load_plugins()
 
     signal.signal(signal.SIGINT, signal_handler)

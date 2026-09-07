@@ -1438,17 +1438,17 @@ async def search_datasets(tenant_id: str, req: dict):
     from rag.prompts.generator import cross_languages, keyword_extraction
 
     kb_ids = req.get("dataset_ids", [])
-    page = int(req.get("page", 1))
-    size = int(req.get("page_size") or req.get("size", 30))
-    rerank_candidates_count = int(req.get("rerank_candidates_count", 64))
-    question = req.get("question", "")
-    doc_ids = req.get("doc_ids", [])
-    use_kg = req.get("use_kg", False)
-    similarity_threshold = float(req.get("similarity_threshold", 0.0))
-    vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3))
-    knn_top_k = max(1, min(int(req.get("knn_top_k", 1024)), 2048))
-    knn_num_candidates = int(req.get("knn_num_candidates", 2048))
-    langs = req.get("cross_languages", [])
+    page = int(req.get("page", 1)) # 返回第几页
+    size = int(req.get("page_size") or req.get("size", 30)) # 每页数量，范围 1～100
+    rerank_candidates_count = int(req.get("rerank_candidates_count", 64)) # 进入最终重排流程的候选数量
+    question = req.get("question", "") # 用户查询文本
+    doc_ids = req.get("doc_ids", []) # 只检索指定文档；空数组表示不限定文档
+    use_kg = req.get("use_kg", False) # 是否额外执行知识图谱检索
+    similarity_threshold = float(req.get("similarity_threshold", 0.0)) # 最终相似度过滤阈值
+    vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3)) # 向量得分在混合得分中的权重
+    knn_top_k = max(1, min(int(req.get("knn_top_k", 1024)), 2048)) # 向量召回最多返回的候选数量
+    knn_num_candidates = int(req.get("knn_num_candidates", 2048)) # ES HNSW 搜索时考察的候选规模
+    langs = req.get("cross_languages", []) # 是否将问题转换为其他语言进行跨语言检索
 
     logging.debug(
         "search_datasets(datasets=%s, tenant=%s, question_len=%s)",
@@ -1459,14 +1459,16 @@ async def search_datasets(tenant_id: str, req: dict):
 
     # Access check for all datasets
     for kb_id in kb_ids:
+        # 检查知识库权限
         if not KnowledgebaseService.accessible(kb_id, tenant_id):
             logging.warning("search_datasets access denied: dataset=%s tenant=%s", kb_id, tenant_id)
             return False, f"Only owner of dataset {kb_id} authorized for this operation."
-
+    # 读取数据库配置
     kbs = KnowledgebaseService.get_by_ids(kb_ids)
     if not kbs:
         return False, "Datasets not found!"
-
+    # 检查这些知识库使用的 Embedding 模型是否兼容,
+    # 跨知识库检索时，向量必须处于相同的向量空间，通常要求使用相同的 Embedding 模型。
     err = validate_dataset_embedding_models(kbs)
     if err:
         return False, err
@@ -1476,6 +1478,7 @@ async def search_datasets(tenant_id: str, req: dict):
     local_doc_ids = list(doc_ids) if doc_ids else []
 
     meta_data_filter = {}
+    # 使用已保存的 Search 配置
     search_id = req.get("search_id", "")
     search_config = {}
     chat_mdl = None
@@ -1485,6 +1488,7 @@ async def search_datasets(tenant_id: str, req: dict):
             logging.warning("search config not found: search_id=%s", search_id)
             return False, "Invalid search_id"
         search_config = search_detail.get("search_config", {})
+        # 根据文档元数据过滤检索范围
         meta_data_filter = search_config.get("meta_data_filter", {})
         similarity_threshold = float(search_config.get("similarity_threshold", similarity_threshold))
         vector_similarity_weight = float(search_config.get("vector_similarity_weight", vector_similarity_weight))
@@ -1509,6 +1513,7 @@ async def search_datasets(tenant_id: str, req: dict):
                 chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
             chat_mdl = LLMBundle(tenant_id, chat_model_config)
     else:
+        # 根据文档元数据过滤检索范围
         meta_data_filter = req.get("meta_data_filter") or {}
         if meta_data_filter.get("method") in ["auto", "semi_auto"]:
             chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
@@ -1516,6 +1521,7 @@ async def search_datasets(tenant_id: str, req: dict):
 
     if meta_data_filter:
         logging.debug("Metadata filter applied: %s, question length: %d, chat_mdl=%s", meta_data_filter, len(question), "None" if chat_mdl is None else "configured")
+        # 元数据过滤
         local_doc_ids = await apply_meta_data_filter(
             meta_data_filter,
             None,
@@ -1527,9 +1533,10 @@ async def search_datasets(tenant_id: str, req: dict):
         )
 
     tenant_ids = []
+    # SELECT * FROM user_tenant WHERE user_id = 当前用户ID;
     tenants = UserTenantService.query(user_id=tenant_id)
     for tenant in tenants:
-        if any(KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id) for kb_id in kb_ids):
+        if any(KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id) for kb_id in kb_ids): # 判断知识库是否属于当前租户
             tenant_ids.append(tenant.tenant_id)
             break
     else:
@@ -1538,6 +1545,7 @@ async def search_datasets(tenant_id: str, req: dict):
     kb = kbs[0]
     _question = question
     if langs:
+        # 将问题翻译成指定语言,然后拼接在一起
         _question = await cross_languages(kb.tenant_id, None, _question, langs)
 
     embd_mdl = None
@@ -1548,34 +1556,40 @@ async def search_datasets(tenant_id: str, req: dict):
     embd_mdl = LLMBundle(kb.tenant_id, embd_model_config)
 
     rerank_mdl = None
+    # 指定 Rerank 模型
     rerank_id = req.get("rerank_id") or search_config.get("rerank_id")
+    # 如果勾选了rerank, 则根据rerank_id获取配置 以及加载rerank模型
     if rerank_id:
         rerank_model_config = resolve_model_config(kb.tenant_id, LLMType.RERANK.value, rerank_id)
         rerank_mdl = LLMBundle(kb.tenant_id, rerank_model_config)
-
+    # 如果配置了关键之, 则将关键字追加到问题中
+    # 是否使用 LLM 提取关键词并追加到问题
     if search_config.get("keyword", req.get("keyword", False)):
         default_chat_model_config = get_tenant_default_model_by_type(kb.tenant_id, LLMType.CHAT)
         chat_mdl = LLMBundle(kb.tenant_id, default_chat_model_config)
         _question += await keyword_extraction(chat_mdl, _question)
 
+    # 给用户问题提取“标签特征”，供后续检索排序使用
     labels = label_question(_question, kbs)
+
+    # 召回
     ranks = await settings.retriever.retrieval(
-        _question,
-        embd_mdl,
-        tenant_ids,
-        kb_ids,
-        page,
-        size,
-        similarity_threshold,
-        vector_similarity_weight,
-        doc_ids=local_doc_ids,
-        knn_top_k=knn_top_k,
-        knn_num_candidates=knn_num_candidates,
-        rerank_mdl=rerank_mdl,
-        rank_feature=labels,
-        trace_id=search_id,
-        must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"},
-        rerank_candidates_count=rerank_candidates_count,
+        _question, # 最终用于检索的问题，可能已经经过翻译或关键词扩展
+        embd_mdl, # 将问题转换为向量的 Embedding 模型
+        tenant_ids, # 租户 ID，决定查询哪些 ES 索引
+        kb_ids, # 限定查询的知识库
+        page, # 最终结果页码
+        size, # 每页返回多少个 Chunk
+        similarity_threshold, # 最终相似度阈值
+        vector_similarity_weight, # 向量分数占比
+        doc_ids=local_doc_ids, # 可选，只检索指定文档
+        knn_top_k=knn_top_k, # ES KNN 最多召回多少个向量候选
+        knn_num_candidates=knn_num_candidates, # ES 每个分片内部用于近似搜索的候选规模
+        rerank_mdl=rerank_mdl, # 可选的专用重排模型
+        rank_feature=labels, # 标签特征
+        trace_id=search_id, # 仅用于串联当前检索配置/日志，方便排查一次检索链路
+        must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"}, # 排除某些类型的 Chunk
+        rerank_candidates_count=rerank_candidates_count, # 拉回应用层重新打分的候选数量，默认 64
     )
 
     if use_kg:

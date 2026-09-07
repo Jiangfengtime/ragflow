@@ -29,6 +29,7 @@ class FulltextQueryer(QueryBase):
     def __init__(self):
         self.tw = term_weight.Dealer()
         self.syn = synonym.Dealer(redis=REDIS_CONN.REDIS if REDIS_CONN.is_alive() else None)
+        # 检索字段及权重
         self.query_fields = [
             "title_tks^10",
             "title_sm_tks^5",
@@ -38,7 +39,13 @@ class FulltextQueryer(QueryBase):
             "content_ltks^2",
             "content_sm_ltks",
         ]
-
+    # RAGFlow 构造全文查询:
+    # 1. 文本标准化：繁体转简体、全角转半角、转小写、删除特殊符号,
+    # 2. 使用 rag_tokenizer 分词。
+    # 3. 使用 term_weight 计算词语权重。
+    # 4. 从 Redis/词典查找同义词。
+    # 5. 中文还会进行细粒度分词、短语匹配和近邻匹配。
+    # 6. 构造带权重的 query_string 文本。
     def question(self, txt, tbl="qa", min_match: float = 0.6):
         original_query = txt
         txt = self.add_space_between_eng_zh(txt)

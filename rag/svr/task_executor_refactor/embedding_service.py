@@ -74,10 +74,12 @@ class EmbeddingService:
         if parser_config is None:
             parser_config = {}
 
-        # Prepare text for embedding using EmbeddingUtils
+        # Embedding 阶段只对内存中的 Chunk 做字段增强，不负责持久化。
+        # titles 通常来自文件名，contents 来自每个 Chunk 的正文。
         titles, contents = EmbeddingUtils.prepare_texts_for_embedding(docs)
 
-        # Encode titles using EmbeddingUtils for truncation
+        # 文件名只编码一次，再复制到每个 Chunk。后面会按 filename_embd_weight
+        # 与正文向量加权合并，使检索同时保留文件名和正文语义。
         tk_count = 0
         if len(titles) > 0 and len(titles) == len(contents):
             async with self._task_context.embed_limiter:
@@ -87,7 +89,8 @@ class EmbeddingService:
         else:
             tts = None
 
-        # Batch encode contents using EmbeddingUtils
+        # 正文按 EMBEDDING_BATCH_SIZE 分批调用模型；embed_limiter 控制所有任务共享的
+        # Embedding 并发，thread_pool_exec 防止同步 SDK 阻塞事件循环。
         vects_batches = []
         for i in range(0, len(contents), self._embedding_batch_size):
             batch = contents[i : i + self._embedding_batch_size]
@@ -111,7 +114,8 @@ class EmbeddingService:
 
         assert len(vects) == len(docs)
 
-        # Attach vectors to docs using EmbeddingUtils
+        # 将最终向量附加回每个 docs 元素，字段名包含维度，例如 q_1024_vec。
+        # 随后 TaskHandler 才会调用 ChunkService.insert_chunks 将其写入 ES。
         vector_size = EmbeddingUtils.attach_vectors(docs, vects)
 
         return tk_count, vector_size

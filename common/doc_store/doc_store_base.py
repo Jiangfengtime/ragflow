@@ -54,7 +54,7 @@ class SparseVector:
     def __repr__(self):
         return str(self)
 
-
+# 全文查询
 class MatchTextExpr:
     def __init__(
         self,
@@ -68,7 +68,7 @@ class MatchTextExpr:
         self.topn = topn  # Not used in ES, but used in Infinity
         self.extra_options = extra_options
 
-
+# 稠密向量查询
 class MatchDenseExpr:
     def __init__(
         self,
@@ -86,7 +86,7 @@ class MatchDenseExpr:
         self.topn = topn
         self.extra_options = extra_options
 
-
+# 稀疏向量查询
 class MatchSparseExpr:
     def __init__(
         self,
@@ -102,7 +102,7 @@ class MatchSparseExpr:
         self.topn = topn
         self.opt_params = opt_params
 
-
+# 张量匹配
 class MatchTensorExpr:
     def __init__(
         self,
@@ -118,7 +118,7 @@ class MatchTensorExpr:
         self.topn = topn
         self.extra_option = extra_option
 
-
+# 多路结果融合
 class FusionExpr:
     def __init__(self, method: str, topn: int, fusion_params: dict | None = None):
         self.method = method
@@ -145,6 +145,13 @@ class OrderByExpr:
         return self.fields
 
 
+# 检索存储通过`DocStoreConnection`抽象,
+# 统一定义索引创建、搜索、插入、更新、删除和结果读取并用下列表达式描述查询：
+# - `MatchTextExpr`：全文查询；
+# - `MatchDenseExpr`：稠密向量查询；
+# - `MatchSparseExpr`：稀疏向量查询；
+# - `MatchTensorExpr`：张量匹配；
+# - `FusionExpr`：多路结果融合。
 class DocStoreConnection(ABC):
     """
     Database operations

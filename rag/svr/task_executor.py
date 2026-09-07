@@ -202,7 +202,7 @@ def set_progress(task_id, from_page=0, to_page=-1, prog=None, msg="Processing...
         d = {"progress_msg": msg}
         if prog is not None:
             d["progress"] = prog
-
+        # 更新任务进度
         TaskService.update_progress(task_id, d)
 
         close_connection()
@@ -217,6 +217,7 @@ def set_progress(task_id, from_page=0, to_page=-1, prog=None, msg="Processing...
         logging.exception(f"set_progress({task_id}), progress: {prog}, progress_msg: {msg}, got exception: {e}")
 
 
+# 【链路三：消费 Task】从 Redis Stream 领取任务，再从 MySQL 补齐运行上下文。
 async def collect():
     global CONSUMER_NAME, DONE_TASKS, FAILED_TASKS
     global UNACKED_ITERATOR
@@ -225,11 +226,14 @@ async def collect():
 
     redis_msg = None
     try:
+        # 优先恢复该消费者名下已领取但尚未 XACK 的 Pending 消息，避免 Worker 异常退出后丢任务。
         if not UNACKED_ITERATOR:
             UNACKED_ITERATOR = REDIS_CONN.get_unacked_iterator(svr_queue_names, SVR_CONSUMER_GROUP_NAME, CONSUMER_NAME)
         try:
             redis_msg = next(UNACKED_ITERATOR)
         except StopIteration:
+            # StopIteration 只是表示 Pending 迭代器已耗尽，不是故障。
+            # 随后按高、低优先级依次通过 XREADGROUP 领取一条尚未分配的新消息。
             for svr_queue_name in svr_queue_names:
                 redis_msg = REDIS_CONN.queue_consumer(svr_queue_name, SVR_CONSUMER_GROUP_NAME, CONSUMER_NAME)
                 if redis_msg:
@@ -240,6 +244,7 @@ async def collect():
 
     if not redis_msg:
         return None, None
+    # RedisMsg 在构造时已将 Stream 中的 JSON payload 反序列化为 dict。
     msg = redis_msg.get_message()
     if not msg:
         logging.error(f"collect got empty message of {redis_msg.get_msg_id()}")
@@ -258,10 +263,12 @@ async def collect():
         _, task_obj = TaskService.get_by_id(msg["id"])
         task = task_obj.to_dict()
     else:
+        # 普通解析消息只携带轻量任务信息；以 task.id 查询 MySQL，补齐 tenant、KB、
+        # 文档位置、parser_config、Embedding 模型等真正执行解析所需的数据。
         task = TaskService.get_task(msg["id"])
 
     if task:
-        canceled = has_canceled(task["id"])
+        canceled = has_canceled(task["id"]) # 判断任务是否已取消
     if not task or canceled:
         state = "is unknown" if not task else "has been cancelled"
         FAILED_TASKS += 1
@@ -1748,7 +1755,7 @@ async def do_handle_task(task):
 
 async def handle_task():
     global DONE_TASKS, FAILED_TASKS
-    redis_msg, task = await collect()
+    redis_msg, task = await collect() # 从redis获取任务
     if not task:
         await asyncio.sleep(5)
         return
@@ -1758,20 +1765,21 @@ async def handle_task():
     task_id = task["id"]
     try:
         CURRENT_TASKS[task["id"]] = copy.deepcopy(task)
-        run_mode = os.environ.get("TE_RUN_MODE", "0")
+        run_mode = os.environ.get("TE_RUN_MODE", "0") # 运行模式
         logging.info(f"TE_RUN_MODE is {run_mode}")
 
         # Check if dry-run comparison is enabled via environment variable
-        if run_mode == "1":  # dry run mode - compare
+        if run_mode == "1":  # dry run mode - compare, 对比模式: 先执行旧版流程，再以拦截写操作的方式执行新版流程，对比两者结果。主要用于迁移验证，速度较慢。
             set_recording_context(RecordingContext())
             await do_handle_task(task)  # original execution
             # dry run mode
             logging.info(f"-----dry run task:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             await TaskManager.dry_run_task(task, get_recording_context(), chat_limiter, minio_limiter, chunk_limiter, embed_limiter, kg_limiter, set_progress, has_canceled)
-        elif run_mode == "0":  # use refactor-ed version
+        elif run_mode == "0":  # use refactor-ed version, 默认模式，使用新版重构后的解析流程
             # switch to refactor-ed version
             logging.info(f"-----run refactor-ed task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             set_recording_context(NullRecordingContext())
+            # 处理任务
             await TaskManager.run_refactored_task(task, chat_limiter, minio_limiter, chunk_limiter, embed_limiter, kg_limiter, set_progress, has_canceled)
         else:  # original version
             logging.info(f"-----run original task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
@@ -1811,6 +1819,8 @@ async def handle_task():
             )
             get_recording_context().save_func_return_value("PipelineOperationLogService.record_pipeline_operation", ret)
 
+    # Handler 全部结束（成功、失败或取消）后执行 XACK，消息才会离开消费者组的 Pending 列表。
+    # 若进程在此之前崩溃，消息仍可由 get_unacked_iterator 恢复处理。
     redis_msg.ack()
 
 
@@ -1908,6 +1918,7 @@ async def report_status():
 
 async def task_manager():
     try:
+        # 处理任务
         await handle_task()
     finally:
         task_limiter.release()
@@ -1956,6 +1967,7 @@ async def main():
 
     logging.info(f"RAGFlow ingestion is ready after {time.time() - start_ts}s initialization.")
     try:
+        # 死循环, 用于处理Redis中的task任务, 这里不断创建受并发数限制的任务消费者。
         while not stop_event.is_set():
             await task_limiter.acquire()
             t = asyncio.create_task(task_manager())

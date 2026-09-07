@@ -218,6 +218,8 @@ EMBEDDING_BATCH_SIZE: int = 16
 
 PARALLEL_DEVICES: int = 0
 
+# 对象存储通过 `settings.STORAGE_IMPL` 使用。
+# 业务代码只关心 `put/get/remove` 等能力，不应直接绑定 MinIO 客户端。
 STORAGE_IMPL_TYPE = os.getenv("STORAGE_IMPL", "MINIO")
 STORAGE_IMPL = None
 

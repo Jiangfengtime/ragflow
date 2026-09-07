@@ -1,0 +1,13 @@
+services:
+  mysql:
+    ports: !override
+      - '3307:3306'
+  minio:
+    ports: !override
+      - '9010:9000'
+      - '9011:9001'
+    volumes:
+      - minio_dev_data:/data
+
+volumes:
+  minio_dev_data:

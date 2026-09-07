@@ -36,7 +36,7 @@ export const useHandleUploadDocument = () => {
             table_column_roles: tableColumnRoles,
           };
         }
-
+        // 文件上传
         const ret = await uploadDocument(fileList as File[], parserConfig);
 
         // Check for success (code === 0) or partial success (code === 500 with some files)
@@ -50,12 +50,12 @@ export const useHandleUploadDocument = () => {
         // Trigger parsing for both full and partial success when parseOnCreation is enabled
         if (
           (isSuccess || isPartialSuccess) &&
-          parseOnCreation &&
+          parseOnCreation && // 如果开启了文档解析
           ret.data?.length > 0
         ) {
           runDocumentByIds({
             documentIds: ret.data.map((x: any) => x.id),
-            run: 1,
+            run: 1, // 开始解析
           });
         }
 

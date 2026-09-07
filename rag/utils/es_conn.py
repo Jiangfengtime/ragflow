@@ -260,6 +260,8 @@ class ESConnection(ESConnectionBase):
                     num_candidates = max(k, min(m.extra_options["num_candidates"], 10000))
                 else:
                     num_candidates = min(k * 2, 10000)
+
+                # 转换为ES KNN查询, ES 使用近似最近邻索引查找与问题向量接近的 Chunk。
                 s = s.knn(
                     m.vector_column_name,
                     k,
@@ -346,6 +348,9 @@ class ESConnection(ESConnectionBase):
 
     def insert(self, documents: list[dict], index_name: str, knowledgebase_id: str = None, refresh: str | bool = "wait_for") -> list[str]:
         # Refers to https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html
+        # documents 中每个元素就是一个最终 Chunk，已经同时包含全文检索字段和向量字段。
+        # Bulk API 要求 action/source 交替排列；Chunk 的业务 id 同时作为 ES _id，
+        # 因而重新解析得到相同 Chunk ID 时执行的是覆盖写，而不是创建重复数据。
         operations = []
         for d in documents:
             assert "_id" not in d
@@ -357,10 +362,13 @@ class ESConnection(ESConnectionBase):
             operations.append({"index": {"_index": index_name, "_id": meta_id}})
             operations.append(d_copy)
 
+        # 最多尝试 ATTEMPT_TIME 次。HTTP 成功且 response.errors=False 时返回 []；
+        # 非空列表表示存在连接异常或某个 Bulk item 写入失败。
         res = []
-        for _ in range(ATTEMPT_TIME):
+        for _ in range(ATTEMPT_TIME): # 如果有异常会重试一次
             try:
                 res = []
+                # 批量写入ES
                 r = self.es.bulk(index=index_name, operations=operations, refresh=refresh, timeout="60s")
                 if re.search(r"False", str(r["errors"]), re.IGNORECASE):
                     return res

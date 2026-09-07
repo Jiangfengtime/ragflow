@@ -516,12 +516,25 @@ async def upload_document(dataset_id, tenant_id):
                     type: string
                     description: Processing status.
     """
+    # 【链路一：文档上传入口】
+    # 该接口只负责把文件及其元数据保存下来，不会在这里直接切 Chunk。
+    # local 分支的主要调用链如下：
+    # Quart multipart 请求
+    #   -> _upload_local_documents()
+    #   -> FileService.upload_document()（线程池中的同步 I/O）
+    #   -> 原文件/缩略图写入对象存储
+    #   -> document、file、file2document 等关系写入 MySQL
+    # 是否立即解析由前端在上传成功后另行调用 POST /documents/ingest 决定。
+    # 根据上传类型分流：local=本地文件，web=网页转 PDF，empty=空白文档。
     upload_type = (request.args.get("type") or "local").lower()
+
+    # 查询知识库, 获得知识库配置
     e, kb = KnowledgebaseService.get_by_id(dataset_id)
     if not e:
         logging.error(f"Can't find the dataset with ID {dataset_id}!")
         return get_error_data_result(message=f"Can't find the dataset with ID {dataset_id}!", code=RetCode.DATA_ERROR)
 
+    # 检查权限, 防止用户向不属于自己的知识库上传文件。
     if not check_kb_team_permission(kb, tenant_id):
         logging.error("no authorization")
         return get_error_data_result(message="no authorization", code=RetCode.AUTHENTICATION_ERROR)
@@ -537,7 +550,7 @@ async def upload_document(dataset_id, tenant_id):
             message='`type` must be one of "local", "web", or "empty".',
             code=RetCode.ARGUMENT_ERROR,
         )
-
+    # 普通上传
     return await _upload_local_documents(kb, tenant_id)
 
 
@@ -656,6 +669,8 @@ async def _upload_empty_document(dataset_id, kb, tenant_id):
 
 
 async def _upload_local_documents(kb, tenant_id):
+    # Quart 分别解析普通表单字段和 multipart 文件字段。这里只做请求层校验；
+    # 文件读取、对象存储和数据库写入统一下沉到 FileService。
     form = await request.form
     files = await request.files
     if "file" not in files:
@@ -686,7 +701,9 @@ async def _upload_local_documents(kb, tenant_id):
                     parser_config_override = None
         except (json.JSONDecodeError, TypeError):
             parser_config_override = None
-
+    # 这里使用线程池，是因为 FileService.upload_document() 内部包含同步的：
+    # Peewee/MySQL 操作、对象存储网络请求、文件读取和缩略图生成。
+    # 直接放在 Quart 事件循环中会阻塞其他 HTTP 请求。
     err, files = await thread_pool_exec(
         FileService.upload_document,
         kb,
@@ -1467,13 +1484,21 @@ async def update_metadata(tenant_id, dataset_id):
 
 
 @manager.route("/documents/ingest", methods=["POST"])  # noqa: F821
-@login_required
-@add_tenant_id_to_kwargs
+@login_required # 用户必须已经登录
+@add_tenant_id_to_kwargs # 把当前登录用户对应的租户 ID 传入函数
 async def ingest(tenant_id):
+    # 格式: {"doc_ids":["096e25b6a92e11f18363f62115845b6f"],"run":1}, 如果是重新解析: {'apply_kb': False, 'delete': True, 'doc_ids': ['096e25b6a92e11f18363f62115845b6f'], 'run': 1}
     req = await get_request_json()
     try:
         user_id = tenant_id
-
+        # 使用线程池`thread_pool_exec`:
+        # 原因: _run_sync() 内部包含：
+        # - Peewee/MySQL 查询。
+        # - MinIO 文件读取。
+        # - PDF 页数统计。
+        # - Elasticsearch 数据清理。
+        # - Redis 消息写入。
+        # 这些基本都是同步调用。为了不阻塞 Quart 的异步事件循环，所以放在线程池中运行。
         error_code, error_message = await thread_pool_exec(_run_sync, user_id, req)
 
         if error_code:
@@ -1488,29 +1513,33 @@ async def ingest(tenant_id):
 
 def _run_sync(user_id: str, req):
     for doc_id in req["doc_ids"]:
+        # 权限校验: 查询document表, 找到文档所属kb_id, 检查用户是否能访问这个知识库
         if not DocumentService.accessible(doc_id, user_id):
             return RetCode.AUTHENTICATION_ERROR, "no authorization"
 
     kb_table_num_map = {}
     for doc_id in req["doc_ids"]:
-        info = {"run": str(req["run"]), "progress": 0}
+        info = {"run": str(req["run"]), "progress": 0} # 构造文档状态
         rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False)
+        # 如果是“重新解析并删除旧结果”，重置数据：
         if rerun_with_delete:
             info["progress_msg"] = ""
             info["chunk_num"] = 0
             info["token_num"] = 0
-
+        # 根据doc_id查询所属人
         doc_tenant_id = DocumentService.get_tenant_id(doc_id)
         if not doc_tenant_id:
             return RetCode.DATA_ERROR, "Tenant not found!"
+        # 根据文档id查询文档内容
         e, doc = DocumentService.get_by_id(doc_id)
         if not e:
             return RetCode.DATA_ERROR, "document not found"
-
+        # 如果是取消解析
         if str(req["run"]) == TaskStatus.CANCEL.value:
             tasks = list(TaskService.query(doc_id=doc_id))
             has_unfinished_task = any((task.progress or 0) < 1 for task in tasks)
             if str(doc.run) in [TaskStatus.RUNNING.value, TaskStatus.CANCEL.value] or has_unfinished_task:
+                # 取消任务
                 cancel_all_task_of(doc_id)
                 # Append a "stopped by user" marker so the history is preserved and
                 # the document no longer looks like it is still waiting in the queue.
@@ -1519,11 +1548,16 @@ def _run_sync(user_id: str, req):
                 logging.debug("Appended cancellation marker to progress_msg on cancel for doc %s", doc_id)
             else:
                 return RetCode.DATA_ERROR, "Cannot cancel a task that is not in RUNNING status"
-        if all([rerun_with_delete, str(doc.run) == TaskStatus.DONE.value]):
+        if all([rerun_with_delete, str(doc.run) == TaskStatus.DONE.value]): # 如果任务全都完成了. 则重置计数器
             DocumentService.clear_chunk_num_when_rerun(doc_id)
-
+        # 写入Mysql的document表
         DocumentService.update_by_id(doc_id, info)
+        # 如果前端传了delete=True
         if req.get("delete", False):
+            # 删除旧数据:
+            # 1. Mysql中旧的Task记录,
+            # 2. ES中该文档原来的Chunk.
+            # 3. 一些文档导航/编译数据.
             TaskService.filter_delete([Task.doc_id == doc_id])
             from rag.advanced_rag.knowlege_compile.dataset_nav import remove_dataset_nav_doc_sync
 
@@ -1532,6 +1566,8 @@ def _run_sync(user_id: str, req):
                 settings.docStoreConn.delete({"doc_id": doc_id}, search.index_name(doc_tenant_id), doc.kb_id)
 
         if str(req["run"]) == TaskStatus.RUNNING.value:
+            # apply_kb = true, 表示重新使用知识库当前的配置覆盖文档配置,
+            # 没有 apply_kb 时，文档继续使用上传时保存的 parser_config。
             if req.get("apply_kb"):
                 e, kb = KnowledgebaseService.get_by_id(doc.kb_id)
                 if not e:
@@ -1541,6 +1577,7 @@ def _run_sync(user_id: str, req):
                 doc.parser_config["metadata"] = kb.parser_config.get("metadata", {})
                 DocumentService.update_parser_config(doc.id, doc.parser_config)
             doc_dict = doc.to_dict()
+            # 开始进入任务创建流程
             DocumentService.run(doc_tenant_id, doc_dict, kb_table_num_map)
 
     return None, None

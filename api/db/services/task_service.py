@@ -77,7 +77,7 @@ def clear_doc_chunking_counter(doc_id: str) -> None:
     except Exception:
         logging.exception("Failed to clear chunking counter for doc %s", doc_id)
 
-
+# todo 这个方法的功能
 def abort_doc_chunking_counter(doc_id: str) -> None:
     if not doc_id:
         return
@@ -458,6 +458,11 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         - Previous task chunks may be reused if available
     """
 
+    # 【链路二：创建并投递解析 Task】
+    # 一个 document 不一定只对应一个 Task：PDF 通常按页范围拆分，表格按行范围拆分。
+    # Task 表保存可恢复、可追踪的持久化状态；Redis Stream 只负责把任务通知给 Worker。
+    # Redis 消息主要携带 task.id/doc_id/page range，Worker 收到后会再从 MySQL 补全
+    # 文档、知识库、模型和 parser_config 等运行上下文。
     def new_task():
         return {
             "id": get_uuid(),
@@ -471,19 +476,24 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     parse_task_array = []
 
     if doc["type"] == FileType.PDF.value:
+        # 此处读取原文件仅用于计算 PDF 总页数，从而决定如何拆 Task；并未开始内容解析。
         file_bin = settings.STORAGE_IMPL.get(bucket, name)
+        # 获取文件页数
         pages = PdfParser.total_page_number(doc["name"], file_bin)
         if pages is None:
             pages = 0
+        # 每个 Task 只负责 [from_page, to_page) 范围，默认每 12 页一个任务。
         page_size = doc["parser_config"].get("task_page_size") or 12
         if doc["parser_id"] == "paper":
             page_size = doc["parser_config"].get("task_page_size") or 22
 
         # Splitting MinerU parsing into page-based tasks would repeatedly upload the entire PDF to the MinerU API server, increasing network bandwidth usage without improving parsing speed. The MinerU API server would also store duplicate copies of these files, wasting disk space.
         is_mineru = False
-        layout_recognizer = doc["parser_config"].get("layout_recognize", "")
+        layout_recognizer = doc["parser_config"].get("layout_recognize", "") # 'DeepDOC'
+        # 如果 layout_recognizer 是一个 32 位字符串，就暂时认为它可能是 tenant_model 表中的模型 ID。
         if isinstance(layout_recognizer, str) and len(layout_recognizer) == 32:
             try:
+                # 如果存的是模型 ID，单从 ID 看不出它是不是 MinerU，所以需要查询数据库：
                 layout_recognizer = get_composite_model_name_by_id(layout_recognizer)
                 if layout_recognizer.lower().endswith("@mineru"):
                     is_mineru = True
@@ -491,6 +501,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
                 pass
         if is_mineru:
             logging.info("Document %s selected MinerU unsplit-task mode with page size %s", doc["id"], MAXIMUM_TASK_PAGE_NUMBER)
+        # 如果是mineru, 则不拆分
         if doc["parser_id"] in ["one", "knowledge_graph"] or doc["parser_config"].get("toc_extraction", False) or is_mineru:
             page_size = MAXIMUM_TASK_PAGE_NUMBER
         page_ranges = doc["parser_config"].get("pages") or [(1, MAXIMUM_PAGE_NUMBER)]
@@ -518,6 +529,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     # Determine suffix based on parser_id (consistent with SAAS version line 444)
     suffix = "common" if doc["parser_id"] != "resume" else "resume"
 
+    # digest 由解析配置、doc_id 和页范围共同决定，用来判断重新解析时能否复用旧 Task 的 Chunk。
     chunking_config = DocumentService.get_chunking_config(doc["id"])
     for task in parse_task_array:
         hasher = xxhash.xxh64()
@@ -548,15 +560,20 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
             settings.docStoreConn.delete({"id": pre_chunk_ids}, search.index_name(chunking_config["tenant_id"]), chunking_config["kb_id"])
     DocumentService.update_by_id(doc["id"], {"chunk_num": ck_num})
 
+    # 先写 MySQL，再发 Redis。这样 Worker 即使立即取得消息，也能根据 task.id
+    # 查询到完整任务；document.id 与 task.doc_id 建立一对多关系。
     bulk_insert_into_db(Task, parse_task_array, True)
-    DocumentService.begin2parse(doc["id"])
+    DocumentService.begin2parse(doc["id"])  # 将 document 更新为“排队/解析中”。
 
     unfinished_task_array = [task for task in parse_task_array if task["progress"] < 1.0]
     chunking_n = sum(1 for task in unfinished_task_array if not task.get("task_type"))
     if chunking_n > 0:
+        # 同一文档可能被拆成多个 Task。Redis 计数器记录还有多少分页任务未结束，
+        # 只有最后一个 Task 才负责执行文档级收尾流程。
         assert seed_doc_chunking_counter(doc["id"], chunking_n), "Can't access Redis. Please check the Redis' status."
     try:
         for unfinished_task in unfinished_task_array:
+            # XADD 到 Redis Stream。投递成功不代表解析完成，只代表任务可以被消费者组领取。
             assert REDIS_CONN.queue_product(settings.get_svr_queue_name(priority, suffix), message=unfinished_task), "Can't access Redis. Please check the Redis' status."
     except Exception:
         abort_doc_chunking_counter(doc["id"])

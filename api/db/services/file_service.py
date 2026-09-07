@@ -528,7 +528,9 @@ class FileService(CommonService):
             "location": doc["location"],
             "source_type": FileSource.KNOWLEDGEBASE,
         }
+        # 文件管理器中的文件节点
         cls.save(**file)
+        # file 与 document 的关联关系
         File2DocumentService.save(id=get_uuid(), file_id=file["id"], document_id=doc["id"])
 
     @classmethod
@@ -577,9 +579,24 @@ class FileService(CommonService):
         DocumentService.delete_by_id(doc.id)
         return True
 
+    # 文件上传
     @classmethod
     @DB.connection_context()
     def upload_document(self, kb, file_objs, user_id, src="local", parent_path: str | None = None, parser_config_override: dict | None = None):
+        """保存上传文件及其数据库关系，但不创建解析任务。
+
+        链路顺序：
+        1. 准备用户文件根目录和知识库目录；
+        2. 为每个上传文件生成稳定的 ``doc_id``；
+        3. 将完整原文件保存到对象存储，键为 ``kb.id + location``；
+        4. 如能生成缩略图，则另存为 ``kb.id + thumbnail_location``；
+        5. 将 Document 元数据写入 MySQL；
+        6. 由 ``add_file_from_kb`` 创建文件树及 File2Document 关联。
+
+        Document 通过 ``kb_id/location/thumbnail`` 定位对象存储内容；
+        File2Document 负责把文件管理模块中的 file_id 映射到 document_id。
+        解析任务由后续 ``POST /documents/ingest`` 创建，而不是由本方法创建。
+        """
         root_folder = self.get_root_folder(user_id)
         pf_id = root_folder["id"]
         self.init_knowledgebase_docs(pf_id, user_id)
@@ -597,6 +614,8 @@ class FileService(CommonService):
 
         err, files = [], []
         for file in file_objs:
+            # doc_id 是整条 RAG 链路的业务主键：MySQL document.id、task.doc_id、
+            # ES Chunk.doc_id 以及最终检索结果中的 doc_id 都使用它进行关联。
             doc_id = file.id if hasattr(file, "id") else get_uuid()
             e, doc = DocumentService.get_by_id(doc_id)
             if e and str(doc.kb_id) != str(kb.id):
@@ -622,10 +641,13 @@ class FileService(CommonService):
                     incoming_fp = getattr(file, "fingerprint", None)
                     new_hash = incoming_fp or xxhash.xxh128(blob).hexdigest()
                     old_hash = doc.content_hash or ""
+
+                    # 将原始二进制写入 MinIO 等对象存储
                     settings.STORAGE_IMPL.put(kb.id, doc.location, blob, kb.tenant_id)
                     doc.size = len(blob)
                     doc.content_hash = new_hash
                     doc = doc.to_dict()
+                    # 创建 Document 元数据
                     DocumentService.update_by_id(doc["id"], doc)
                     if new_hash != old_hash:
                         files.append((doc, blob))
@@ -635,7 +657,8 @@ class FileService(CommonService):
                 continue
             try:
                 DocumentService.check_doc_health(kb.tenant_id, file.filename)
-                filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id)
+                filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id) # 处理重复名称, 如果同一知识库中已经存在相同文件名，系统会生成一个不冲突的新名称
+                # 判断文件类型
                 filetype = filename_type(filename)
                 if filetype == FileType.OTHER.value:
                     raise RuntimeError("This type of file has not been supported yet!")
@@ -646,34 +669,48 @@ class FileService(CommonService):
 
                 blob = file.read()
                 if filetype == FileType.PDF.value:
+                    # PDF文档解析
                     blob = read_potential_broken_pdf(blob)
+                # 对象存储中保存完整原文件，而不是 Chunk 文本。
+                # bucket=kb.id，object key=location；MySQL document.location 保存 object key。
                 settings.STORAGE_IMPL.put(kb.id, location, blob)
 
+                # 生成缩略图
                 img = thumbnail_img(filename, blob)
                 thumbnail_location = ""
+                # 如果生成了缩略图, 也将缩略图存储到MinIO
                 if img is not None:
                     thumbnail_location = f"thumbnail_{doc_id}.png"
+                    # 缩略图与原文件位于同一个知识库 bucket，document.thumbnail 保存其 object key。
                     settings.STORAGE_IMPL.put(kb.id, thumbnail_location, img)
 
                 incoming_fp = getattr(file, "fingerprint", None)
+
+                # 创建document记录
                 doc = {
                     "id": doc_id,
                     "kb_id": kb.id,
+                    # 判断解析器
                     "parser_id": self.get_parser(filetype, filename, kb.parser_id),
                     "pipeline_id": kb.pipeline_id,
+                    # Chunk 大小、重叠率、页码范围等。
                     "parser_config": merged_parser_config,
                     "created_by": user_id,
                     "type": filetype,
                     "name": filename,
                     "source_type": src,
                     "suffix": Path(filename).suffix.lstrip("."),
+                    # MinIO 中的对象名称
                     "location": location,
                     "size": len(blob),
                     "thumbnail": thumbnail_location,
-                    "content_hash": incoming_fp or xxhash.xxh128(blob).hexdigest(),
+                    # 用于判断文件内容是否发生变化
+                    "content_hash": incoming_fp or xxhash.xxh128(blob).hexdigest()
                 }
-                DocumentService.insert(doc)
 
+                # 先写 document 元数据，再建立文件管理记录和 File2Document 关系。
+                # 从此处开始，doc_id 才能反向解析出原文件的 bucket/object key。
+                DocumentService.insert(doc)
                 FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
                 files.append((doc, blob))
             except Exception as e:  # noqa: BLE001 - collect per-file errors and keep processing the rest

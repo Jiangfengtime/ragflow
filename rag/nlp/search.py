@@ -62,6 +62,9 @@ class Dealer:
         group_docs: list[list] | None = None
 
     async def get_vector(self, txt, emb_mdl, top_k=10, num_candidates=20, similarity=0.1):
+        # 将查询文本编码成与知识库 Chunk 相同向量空间的一维向量。
+        # 向量维度同时决定 ES 字段名，例如 1024 维模型对应 q_1024_vec；因此跨知识库
+        # 检索必须使用兼容的 Embedding 模型，否则无法查询同一个向量字段。
         qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
         shape = np.array(qv).shape
         if len(shape) > 1:
@@ -93,6 +96,7 @@ class Dealer:
         if not chunk_doc_ids:
             return sres
 
+        # 从ES候选Chunk中获取doc_id,根据这些 doc_id 查询 MySQL 的文档表。
         existing_doc_ids = await self._existing_doc_ids(chunk_doc_ids)
         if len(existing_doc_ids) == len(set(chunk_doc_ids)):
             return sres
@@ -140,10 +144,17 @@ class Dealer:
             condition["must_not"] = req["must_not"]
         return condition
 
+    # `Dealer.search()` 组合以下部分：
+    # 1. `kb_id`、`doc_id`、可用状态等过滤条件；
+    # 2. `FulltextQueryer` 生成的全文查询；
+    # 3. Embedding 模型产生的查询向量；
+    # 4. `MatchDenseExpr` 发起余弦相似度检索；
+    # 5. `FusionExpr` 融合全文与向量结果；
+    # 6. 根据后端能力执行 Elasticsearch、Infinity 等不同实现。
     async def search(self, req, idx_names: str | list[str], kb_ids: list[str], emb_mdl=None, highlight: bool | list | None = None, rank_feature: dict | None = None, min_match: bool = True):
         if highlight is None:
             highlight = False
-
+        # 构造过滤条件, 这些过滤条件不负责计算相似度，只负责限制搜索范围。
         filters = self.get_filters(req)
         orderBy = OrderByExpr()
 
@@ -201,6 +212,14 @@ class Dealer:
                 highlightFields = []
             elif isinstance(highlight, list):
                 highlightFields = highlight
+
+            """
+            构造全文检索条件:
+            1. 对问题分词、
+            2.提取关键词、
+            3.构造ES query_string 查询、
+            4.设置minimum_should_match
+            """
             matchText, keywords = self.qryr.question(qst, min_match=(0.3 if min_match else 0))
             if emb_mdl is None:
                 matchExprs = [matchText] if matchText else []
@@ -208,6 +227,8 @@ class Dealer:
                 total = self.dataStore.get_total(res)
                 logging.debug("Dealer.search TOTAL: {}".format(total))
             else:
+                # 生成问题向量并构造 KNN 查询：top_k 是期望保留的近邻数量，
+                # num_candidates 是 HNSW 在每个分片中考察的候选规模，后者越大通常越准但越慢。
                 matchDense = await self.get_vector(qst, emb_mdl, top_k=knn_top_k, num_candidates=knn_num_candidates, similarity=req.get("similarity", 0.1))
                 q_vec = matchDense.embedding_data
                 # ES path no longer fetches chunk vectors here. The clean
@@ -231,14 +252,19 @@ class Dealer:
                     vector_weight = req.get("vector_similarity_weight", 0.3)
                     fusionExpr = FusionExpr("weighted_sum", knn_top_k, {"weights": f"{1 - float(vector_weight)},{float(vector_weight)}"})
                 else:
+                    # ES 的这一组固定权重只服务于“第一阶段候选召回”，让候选集合以向量结果为主；
+                    # 用户配置的 vector_similarity_weight 会在 retrieval() 的第二阶段重新打分时真正应用。
                     fusionExpr = FusionExpr("weighted_sum", knn_top_k, {"weights": "0.001,1"})
                 matchExprs = [matchText, matchDense, fusionExpr] if matchText else [matchDense]
 
+                # 对于当前 ES 实现，会生成一个同时包含 query_string（倒排索引）和
+                # knn（向量索引）的请求。本次只取 rerank_candidates_count 个候选，并非最终排名。
                 res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
                 total = self.dataStore.get_total(res)
                 logging.debug("Dealer.search TOTAL: {}".format(total))
 
-                # If result is empty, try again with lower min_match
+                # 第一次没有候选时执行兜底召回：降低文本最低匹配比例与向量相似度门槛。
+                # 指定 doc_id 时则直接读取该文档范围内的 Chunk，避免严格查询条件导致空结果。
                 if total == 0:
                     if filters.get("doc_id"):
                         res = await thread_pool_exec(self.dataStore.search, src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
@@ -402,6 +428,8 @@ class Dealer:
         """
         if not sres.ids or not sres.query_vector:
             return {}
+        # 第二次查询只允许命中第一阶段已经召回的 Chunk ID。它不会扩大候选集合，
+        # 作用是取得不混入全文检索 _score 的纯 KNN 分数，并避免把完整向量传回 Python。
         dim = len(sres.query_vector)
         matchDense = MatchDenseExpr(
             f"q_{dim}_vec",
@@ -482,12 +510,23 @@ class Dealer:
             title_tks = [t for t in sres.field[i].get("title_tks", "").split() if t]
             question_tks = [t for t in sres.field[i].get("question_tks", "").split() if t]
             important_kwd = sres.field[i].get("important_kwd", [])
+            # 第二阶段文本打分会人为重复高价值字段：正文×1、标题×2、重要词×5、
+            # 预设问题×6。token_similarity 衡量加权词项覆盖率，不是 ES 原始 BM25 _score。
             tks = content_ltks + title_tks * 2 + important_kwd * 5 + question_tks * 6
             ins_tw.append(tks)
 
+        # Python重新计算的词项匹配分数
         tksim = np.array(self.qryr.token_similarity(keywords, ins_tw), dtype=np.float64)
+
+        # ES针对候选Chunk计算的向量相似度
         vtsim = np.array([knn_scores.get(chunk_id, 0.0) for chunk_id in sres.ids], dtype=np.float64)
+
+        # 标签匹配分数 + PageRank分数
         rank_fea = self._rank_feature_scores(rank_feature, sres)
+
+        # tksim = Python重新计算的词项匹配分数;
+        # vtsim = ES针对候选Chunk计算的向量相似度;
+        # rank_fea = 标签匹配分数 + PageRank分数
         sim = tkweight * tksim + vtweight * vtsim + rank_fea
         return sim, tksim, vtsim
 
@@ -525,12 +564,15 @@ class Dealer:
         return sim + rank_fea, tksim, vtsim
 
     def rerank_by_model(self, rerank_mdl, sres, query, tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None):
+        # 对问题进行分词
         _, keywords = self.qryr.question(query)
 
         for i in sres.ids:
             if isinstance(sres.field[i].get("important_kwd", []), str):
                 sres.field[i]["important_kwd"] = [sres.field[i]["important_kwd"]]
         ins_tw = []
+        # 构造候选文档文本
+        # 每个候选的输入由三部分构成：1. Chunk正文分词、2. 文档标题分词、3. 重要关键词
         for i in sres.ids:
             # content_ltks = list(OrderedDict.fromkeys(sres.field[i][cfield].split()))
             content_ltks = sres.field[i][cfield].split()
@@ -539,21 +581,40 @@ class Dealer:
             tks = content_ltks + title_tks + important_kwd
             ins_tw.append(tks)
 
+        # 转换为普通文本
         docs = [remove_redundant_spaces(" ".join(tks)) for tks in ins_tw]
 
+        # 计算词项匹配分数: 它衡量问题关键词在候选 Chunk 中的覆盖情况。
+        # 这不是 ES 返回的原始 BM25 _score，而是 RAGFlow 在 Python 中重新计算的词项匹配分数。
         tksim = self.qryr.token_similarity(keywords, ins_tw)
+
         # rerank_mdl.similarity() returns scores normalized to [0, 1] for every
         # provider (see RerankModel.Base.similarity), so the blend below stays
         # on a single scale regardless of the configured reranker.
+        # 调用 Rerank 模型
+        # Rerank模型一次接收: 一个问题 + 多个候选Chunk
+        # 然后分别判断问题与每个Chunk的相关程度
+        # 返回值不再是Embedding 余弦相似度, 而是Rerank模型分数
         vtsim, _ = rerank_mdl.similarity(query, docs)
+
         ## For rank feature(tag_fea) scores.
+        # 计算标签和 PageRank 加分, 包含: 问题标签与Chunk标签匹配分数 + Chunk的PageRank分数,
+        # 没有配置标签或PageRank时, 一般为0
         rank_fea = self._rank_feature_scores(rank_feature, sres)
 
+        # 融合最终分数:
+        # 最终分数 = 关键词匹配权重 × 关键词分数 + Rerank权重 × Rerank模型分数 + 标签/PageRank加分
         return tkweight * np.array(tksim) + vtweight * vtsim + rank_fea, tksim, vtsim
 
     def hybrid_similarity(self, ans_embd, ins_embd, ans, inst):
         return self.qryr.hybrid_similarity(ans_embd, ins_embd, rag_tokenizer.tokenize(ans).split(), rag_tokenizer.tokenize(inst).split())
 
+    # 召回与重排
+    # 1. 词法召回(全文/BM25) + 语义召回(向量/KNN)
+    # 2. 融合候选
+    # 3. 内置混合打分或Rerank模型
+    # 4. 相似度阈值 + top N 截断
+    # 5. chunks + doc_aggs
     async def retrieval(
         self,
         question,
@@ -562,11 +623,11 @@ class Dealer:
         kb_ids,
         page,  # MUST be 1 when rerank_mdl is specified
         page_size,  # it is topn when rerank_mdl is specified
-        similarity_threshold=0.2,
-        vector_similarity_weight=0.3,
+        similarity_threshold=0.2, # 最低相似度门槛
+        vector_similarity_weight=0.3, # 语义向量相对于词法匹配的权重(相当于向量权重0.3, 文本权重0.7)
         doc_ids=None,
         aggs=True,
-        rerank_mdl=None,
+        rerank_mdl=None, # 可选的专用重排模型
         highlight=False,
         rank_feature: dict | None = {PAGERANK_FLD: 10},
         trace_id=None,
@@ -585,17 +646,22 @@ class Dealer:
         Moreover, when rerank_candidates_count expands into the next retrieval window, new records are added to the candidate set and the entire set is reranked.
           That meant the previous returned pages might not be the same as the current returned pages, which is not acceptable for pagination.
         """
+        # 初始化返回结果
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
             return ranks
 
         page = max(page, 1)
+        # 检查分页是否合法, 因为程序只能对前 rerank_candidates_count 个候选重新排序。
+        # 如果请求范围超过候选窗口，无法保证分页正确。
         if page * page_size > rerank_candidates_count:
             raise Exception(f"rerank_candidates_count({rerank_candidates_count}) must be greater than page * page_size({page * page_size}) to ensure correct pagination.")
+        # 配置了 rerank_mdl 时，只允许：page == 1
         if rerank_mdl is not None and page != 1:
             raise Exception(f"Pagination is not supported when rerank_mdl is specified. Please set page=1 to retrieve the top {page_size} results.")
 
         rerank_candidates_page = 1
+        # 构造内部检索请求
         req = {
             "kb_ids": kb_ids,
             "doc_ids": doc_ids,
@@ -604,7 +670,7 @@ class Dealer:
             "question": question,
             "vector": True,
             "similarity": similarity_threshold,
-            "available_int": 1,
+            "available_int": 1, # available_int=1 表示只检索当前可用的 Chunk
             "vector_similarity_weight": vector_similarity_weight,
             "knn_top_k": knn_top_k,
             "knn_num_candidates": knn_num_candidates,
@@ -616,11 +682,18 @@ class Dealer:
         if isinstance(tenant_ids, str):
             tenant_ids = tenant_ids.split(",")
 
+        # 确定ES索引
         idx_names = [index_name(tid) for tid in tenant_ids]
+        # 根据向量检索权重，决定是否限制关键词的最低匹配比例
         min_match = vector_similarity_weight < 0.8
+
+        # 调用search()进行第一阶段召回
         sres = await self.search(req, idx_names, kb_ids, embd_mdl, highlight, rank_feature=rank_feature, min_match=min_match)
         # Temporary retrieval-side guard: prune chunks whose parent document no
         # longer exists before reranking and returning results.
+
+        # 兜底保护: [正常情况下, 删除文档时应该同步删除ES Chunk]
+        # 过滤掉所属文档已经从Mysql删除, 但仍残留在ES中的Chunk.
         sres = await self._prune_deleted_chunks(sres)
         if sres.total == 0:
             ranks["doc_aggs"] = []
@@ -637,7 +710,12 @@ class Dealer:
             bool(rerank_mdl),
         )
 
+        # 如果配置了重排模型, 则进行重排
         if rerank_mdl and sres.total > 0:
+            # 重排
+            # sim: 融合后的最终分数
+            # tsim: 词项匹配分数
+            # vsim: Rerank模型分数
             sim, tsim, vsim = self.rerank_by_model(
                 rerank_mdl,
                 sres,
@@ -676,7 +754,11 @@ class Dealer:
                 # KNN-only call filtered by the candidate ids, then merge it
                 # with locally computed term similarity using the user's
                 # weight. Chunk vectors stay in the index.
+                # ES 默认路径的第二阶段：先取得候选的纯 KNN 分数，再与 Python 计算的
+                # token_similarity 融合。这里的文本分数不是第一阶段 ES 返回的 BM25 _score。
                 knn_scores = await self._knn_scores(sres, idx_names, kb_ids)
+                # 真正应用用户配置的权重：
+                # final = (1-vector_weight)*term_score + vector_weight*knn_score + tag/PageRank。
                 sim, tsim, vsim = self.rerank_with_knn(
                     sres,
                     question,
@@ -692,19 +774,25 @@ class Dealer:
             return ranks
 
         # Use stable sort for deterministic ordering when scores are tied
+        # 按 sim 降序排列
         sorted_idx = np.argsort(sim_np * -1, kind="stable")
 
-        # When vector_similarity_weight is 0, similarity_threshold is not meaningful for term-only scores.
+        # similarity_threshold 在第一阶段作为 KNN 门槛使用，此处还会对重新融合后的最终分数
+        # 再过滤一次。纯文本模式下分数量纲不同，因此不使用向量相似度阈值。
         post_threshold = 0.0 if vector_similarity_weight <= 0 else similarity_threshold
 
+        # 过滤低于 similarity_threshold 的候选
         valid_idx = [int(i) for i in sorted_idx if sim_np[i] >= post_threshold]
         filtered_count = len(valid_idx)
+        # total 只表示本次 rerank_candidates_count 候选窗口内通过阈值的数量，
+        # 不是 ES 全索引中所有潜在命中 Chunk 的总数。
         ranks["total"] = int(filtered_count)
 
         if filtered_count == 0:
             ranks["doc_aggs"] = []
             return ranks
 
+        # 截取 page_size
         begin = (page - 1) * page_size
         end = begin + page_size
         page_idx = valid_idx[begin:end]
@@ -713,6 +801,7 @@ class Dealer:
         vector_column = f"q_{dim}_vec"
         zero_vector = [0.0] * dim
 
+        # 构造 ranks["chunks"]
         for i in page_idx:
             id = sres.ids[i]
             chunk = sres.field[id]
@@ -725,6 +814,8 @@ class Dealer:
             # path) and otherwise emit a zero placeholder so the downstream
             # shape stays stable. Citation callers refill this via
             # Dealer.fetch_chunk_vectors when needed.
+            # 因此 ES 主链路返回的 vector 通常是等维零向量占位；需要生成引用时，
+            # 调用方再通过 fetch_chunk_vectors() 按最终 Chunk ID 精确读取真实向量。
             d = {
                 "chunk_id": id,
                 "content_ltks": chunk["content_ltks"],
@@ -752,6 +843,8 @@ class Dealer:
             ranks["chunks"].append(d)
 
         if aggs:
+            # 文档聚合统计的是 valid_idx（候选窗口内通过阈值的 Chunk），用于展示各文档
+            # 命中数量；它同样不是对整个 ES 结果集执行的全量聚合。
             for i in valid_idx:
                 id = sres.ids[i]
                 chunk = sres.field[id]
@@ -861,11 +954,13 @@ class Dealer:
         else:
             idx_nms = [index_name(tid) for tid in tenant_ids]
         match_txt, _ = self.qryr.question(question, min_match=0.0)
+        # 先把问题分词并构造 ES 全文检索条件，然后只搜索标签知识库
         res = self.dataStore.search([], [], {}, [match_txt], OrderByExpr(), 0, 0, idx_nms, kb_ids, ["tag_kwd"])
         aggs = self.dataStore.get_aggregation(res, "tag_kwd")
         if not aggs:
             return {}
         cnt = np.sum([c for _, c in aggs])
+        # 计算标签权重
         tag_fea = sorted([(a, round(0.1 * (c + 1) / (cnt + S) / max(1e-6, all_tags.get(a, 0.0001)))) for a, c in aggs], key=lambda x: x[1] * -1)[:topn_tags]
         return {a.replace(".", "_"): max(1, c) for a, c in tag_fea}
 

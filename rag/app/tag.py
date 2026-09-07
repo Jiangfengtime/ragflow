@@ -119,7 +119,7 @@ def chunk(filename, binary=None, lang="Chinese", callback=None, **kwargs):
 
     raise NotImplementedError("Excel, csv(txt) format files are supported.")
 
-
+# 本质上是：**根据问题从标签知识库中推断相关标签，再提升具有相同标签的候选 Chunk 排名。**它不调用 LLM，也不会直接过滤 Chunk。
 def label_question(question, kbs):
     from api.db.services.knowledgebase_service import KnowledgebaseService
     from rag.graphrag.utils import get_tags_from_cache, set_tags_to_cache
@@ -127,11 +127,14 @@ def label_question(question, kbs):
     tags = None
     tag_kb_ids = []
     for kb in kbs:
+        # 找出配置的“标签知识库”
         if kb.parser_config.get("tag_kb_ids"):
             tag_kb_ids.extend(kb.parser_config["tag_kb_ids"])
     if tag_kb_ids:
+        # 先从Redis中读取标签在整个标签库中的分布
         all_tags = get_tags_from_cache(tag_kb_ids)
         if not all_tags:
+            # Redis中如果没有, 就查询ES
             all_tags = settings.retriever.all_tags_in_portion(kb.tenant_id, tag_kb_ids)
             set_tags_to_cache(tags=all_tags, kb_ids=tag_kb_ids)
         else:

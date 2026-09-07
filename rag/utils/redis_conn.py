@@ -43,6 +43,8 @@ class RedisMsg:
         self.__message = json.loads(message["message"])
 
     def ack(self):
+        # XACK 只确认当前消费者组中的这条消息；它不会删除 MySQL Task 记录。
+        # 确认前消息位于 Pending Entries List，Worker 崩溃后仍可恢复；确认后本组不再重投。
         try:
             self.__consumer.xack(self.__queue_name, self.__group_name, self.__msg_id)
             return True
@@ -402,10 +404,15 @@ class RedisDB:
         return False
 
     def queue_product(self, queue, message) -> bool:
+        """通过 XADD 将轻量任务消息追加到 Redis Stream。
+
+        Redis 这里只承担异步通知和消费协调；任务的持久化状态仍保存在 MySQL Task 表。
+        payload 使用统一的 ``message`` 字段包装 JSON，消费端由 RedisMsg 反序列化。
+        """
         for _ in range(3):
             try:
                 payload = {"message": json.dumps(message)}
-                self.REDIS.xadd(queue, payload)
+                self.REDIS.xadd(queue, payload) # 写入Redis
                 return True
             except Exception as e:
                 logging.exception("RedisDB.queue_product " + str(queue) + " got exception: " + str(e))
@@ -413,7 +420,12 @@ class RedisDB:
         return False
 
     def queue_consumer(self, queue_name, group_name, consumer_name, msg_id=b">") -> RedisMsg:
-        """https://redis.io/docs/latest/commands/xreadgroup/"""
+        """通过消费者组领取一条 Redis Stream 消息。
+
+        group 不存在时从 stream 起点创建；默认 ``msg_id='>'`` 只领取尚未分配给本组消费者的
+        新消息。一次最多读取一条，读取后进入 Pending，直到调用 RedisMsg.ack() 才算完成。
+        同组多个 Task Executor 竞争消费，因此一条新消息只会交给其中一个 Worker。
+        """
         for _ in range(3):
             try:
                 try:
@@ -436,6 +448,7 @@ class RedisDB:
                     "block": 5,
                     "streams": {queue_name: msg_id},
                 }
+                # XREADGROUP 返回为空表示当前没有新任务，这是正常轮询结果，不是异常。
                 messages = self.REDIS.xreadgroup(**args)
                 if not messages:
                     return None

@@ -37,6 +37,7 @@ from api.constants import API_VERSION
 from common.exceptions import ModelException
 from common.misc_utils import get_uuid
 
+# 加载关系库、对象存储、Doc Store、模型等配置
 settings.init_settings()
 
 __all__ = ["app"]

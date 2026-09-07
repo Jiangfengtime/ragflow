@@ -1138,6 +1138,7 @@ class User(DataBaseModel, AuthUser):
         db_table = "user"
 
 
+# | `Tenant` | 数据与模型配置的主要隔离边界 |
 class Tenant(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=100, null=True, help_text="Tenant name", index=True)
@@ -1256,6 +1257,7 @@ class TenantLangfuse(DataBaseModel):
         db_table = "tenant_langfuse"
 
 
+# `Knowledgebase` | 知识库/数据集，持有解析器、Embedding 等配置
 class Knowledgebase(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
@@ -1315,6 +1317,7 @@ class Knowledgebase(DataBaseModel):
         db_table = "knowledgebase"
 
 
+# `Document` | 文档元数据及解析状态，不保存完整文件二进制
 class Document(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     thumbnail = TextField(null=True, help_text="thumbnail base64 string")
@@ -1329,7 +1332,7 @@ class Document(DataBaseModel):
     location = CharField(max_length=255, null=True, help_text="where dose it store", index=True)
     size = BigIntegerField(default=0, index=True)
     token_num = IntegerField(default=0, index=True)
-    chunk_num = IntegerField(default=0, index=True)
+    chunk_num = IntegerField(default=0, index=True) #
     progress = FloatField(default=0, index=True)
     progress_msg = TextField(null=True, help_text="process message", default="")
     process_begin_at = DateTimeField(null=True, index=True)
@@ -1337,7 +1340,7 @@ class Document(DataBaseModel):
     suffix = EmptyStringCharField(max_length=32, null=False, help_text="The real file extension suffix", index=True)
 
     content_hash = CharField(max_length=32, null=True, help_text="xxhash128 of document content for change detection", default="", index=True)
-
+    # run: 0-尚未解析, 1-开始解析, 2-取消解析
     run = CharField(max_length=1, null=True, help_text="start to run processing or cancel.(1: run it; 2: cancel)", default="0", index=True)
     status = CharField(max_length=1, null=True, help_text="is it validate(0: wasted, 1: validate)", default="1", index=True)
 
@@ -1345,6 +1348,7 @@ class Document(DataBaseModel):
         db_table = "document"
 
 
+# `File` | 文件管理器中的目录与文件节点
 class File(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     parent_id = CharField(max_length=32, null=False, help_text="parent folder id", index=True)
@@ -1362,6 +1366,7 @@ class File(DataBaseModel):
         db_table = "file"
 
 
+# `File2Document` | 文件对象与知识库文档的关联
 class File2Document(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     file_id = CharField(max_length=32, null=True, help_text="file id", index=True)
@@ -1425,6 +1430,7 @@ class FileCommitItem(DataBaseModel):
 # no code path reads them.
 
 
+# `Task` | 文档解析任务，可按页或表格范围拆分
 class Task(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     doc_id = CharField(max_length=32, null=False, index=True)
@@ -1451,6 +1457,7 @@ class Task(DataBaseModel):
     chunk_ids = EmptyStringLongTextField(null=True, help_text="chunk ids", default="")
 
 
+# `Dialog` | 聊天助手配置，包括知识库、模型、阈值和提示词
 class Dialog(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1490,6 +1497,7 @@ class Dialog(DataBaseModel):
         db_table = "dialog"
 
 
+# `Conversation` | 具体会话与消息历史
 class Conversation(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     dialog_id = CharField(max_length=32, null=False, index=True)

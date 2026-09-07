@@ -181,5 +181,8 @@ def init_table():
 
 
 if __name__ == "__main__":
+    # 建立数据库连接及必要结构
     init_web_db()
+
+    # 初始化基础业务数据
     init_web_data()

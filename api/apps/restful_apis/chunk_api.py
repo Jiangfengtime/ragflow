@@ -485,7 +485,7 @@ async def retrieval_test(tenant_id):
             return get_result(message="No chunk found! Check the chunk status please!", code=RetCode.DATA_ERROR)
         return server_error_response(e)
 
-
+# 查询详情
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks", methods=["GET"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs

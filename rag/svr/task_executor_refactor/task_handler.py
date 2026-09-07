@@ -149,9 +149,10 @@ class TaskHandler:
             "clone",
         } | STRUCTURE_MERGE_TASK_TYPES and not task_type.startswith("dataflow")
 
+    # 真正的处理入口
     async def handle_task(self) -> None:
         try:
-            await self.handle()
+            await self.handle() # 进入新版解析实现
         except Exception:
             if self._is_standard_chunking_task(self._task_context.task_type):
                 abort_doc_chunking_counter(self._task_context.doc_id)
@@ -205,13 +206,14 @@ class TaskHandler:
 
         # Language defaults to "Chinese" via TaskContext._DEFAULTS 鈥?safe to bind model directly.
         # Bind embedding model (matching original do_handle_task order: bind + init_kb before routing)
+        # 绑定 Embedding 模型
         result = await self._bind_embedding_model()
         if result is None:
             return
         embedding_model, vector_size = result
 
         with embedding_model:
-            self._init_kb(vector_size)
+            self._init_kb(vector_size) # 在解析文档前，确保当前租户对应的文档索引已经存在。
 
             # Handle dataflow tasks (after init_kb, matching original behavior)
             if task_type == "dataflow" and ctx.doc_id == CANVAS_DEBUG_DOC_ID:
@@ -292,10 +294,10 @@ class TaskHandler:
     def _init_kb(self, vector_size: int) -> None:
         """Initialize knowledge base index."""
         ctx = self._task_context
-        idxnm = search.index_name(ctx.tenant_id)
+        idxnm = search.index_name(ctx.tenant_id) # 根据租户 ID 生成索引名
         parser_id = ctx.parser_id
         # Create index if not exists
-        settings.docStoreConn.create_idx(idxnm, ctx.kb_id, vector_size, parser_id)
+        settings.docStoreConn.create_idx(idxnm, ctx.kb_id, vector_size, parser_id) # 创建索引
 
     async def _run_dataflow(self) -> None:
         """Run dataflow pipeline."""
@@ -337,7 +339,7 @@ class TaskHandler:
                     embd_model_config = get_model_config_by_id(task_tenant_id, LLMType.EMBEDDING, ctx.tenant_embd_id)
                 except LookupError:
                     embd_model_config = resolve_model_config(task_tenant_id, LLMType.EMBEDDING, task_embedding_id)
-            elif task_embedding_id:
+            elif task_embedding_id: # 根据embedding_id获取模型配置
                 embd_model_config = resolve_model_config(task_tenant_id, LLMType.EMBEDDING, task_embedding_id)
             else:
                 embd_model_config = get_tenant_default_model_by_type(task_tenant_id, LLMType.EMBEDDING)
@@ -414,7 +416,7 @@ class TaskHandler:
             if chunks:
                 task_doc_id = (ctx.doc_ids or [ctx.doc_id] or [GRAPH_RAPTOR_FAKE_DOC_ID])[0]
                 chunk_service = ChunkService(ctx=ctx)
-                insert_result = await chunk_service.insert_chunks(ctx.id, task_tenant_id, task_dataset_id, chunks)
+                insert_result = await chunk_service.insert_chunks(ctx.id, task_tenant_id, task_dataset_id, chunks) # 写入chunk
                 if insert_result:
                     ctx.recording_context.record("insertion_result", "success")
                 else:
@@ -567,12 +569,20 @@ class TaskHandler:
         start_ts = timer()
         chunk_service = ChunkService(ctx=ctx)
 
-        # Get storage binary
+        # 【普通文档解析主链路】
+        # 1. 根据 doc_id 定位并读取对象存储中的完整原文件；
+        # 2. 解析原文件、切 Chunk，并将 Chunk 图片保存到对象存储；
+        # 3. 调用 Embedding 模型，把向量直接附加到内存中的 Chunk dict；
+        # 4. 批量写入配置的 doc engine（当前为 Elasticsearch）；
+        # 5. 更新 MySQL 中的 Task Chunk IDs、Document 统计和执行进度；
+        # 6. 最后一个分页 Task 执行文档级收尾，然后由外层对 Redis 消息 XACK。
+
+        # File2DocumentService 将 doc_id 转换成对象存储 bucket/object key。
         bucket, name = File2DocumentService.get_storage_address(doc_id=ctx.doc_id)
         binary = await self._get_storage_binary(bucket, name)
         if binary is None:
             raise FileNotFoundError(f"Can not find file <{ctx.name}> from minio. Could you try it again.")
-
+        # build_chunks 返回的是尚未生成向量、尚未写入 ES 的内存对象。
         chunks = await chunk_service.build_chunks(binary, on_chunking_start)
         ctx.recording_context.record("chunks", chunks)
         chunk_ids = [c.get("id") for c in chunks if isinstance(c, dict) and "id" in c]
@@ -601,6 +611,8 @@ class TaskHandler:
         start_ts = timer()
         embedding_service = EmbeddingService(ctx=ctx)
         try:
+            # 对 Chunk 文本批量编码，并写入形如 q_{vector_size}_vec 的字段；
+            # 此处仍只修改内存中的 chunks，下一阶段才真正写入 ES。
             token_count, vector_size = await embedding_service.embed_chunks(chunks, embedding_model, ctx.parser_config)
         except TaskCanceledException:
             raise
@@ -631,6 +643,8 @@ class TaskHandler:
             ctx.progress_cb(-1, msg="Task has been canceled.")
             return
 
+        # chunks 此时同时包含文本检索字段和向量字段；insert_chunks 分批写入 ES，
+        # 并把已成功写入的 Chunk ID checkpoint 到 MySQL Task 记录。
         insert_result = await chunk_service.insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks)
 
         if not insert_result:
@@ -658,7 +672,7 @@ class TaskHandler:
         # Update document stats
         if ctx.write_interceptor:
             ctx.write_interceptor.intercept("DocumentService.increment_chunk_num")
-        else:
+        else: # 更新 Document 的 Chunk 数和 Token 数
             DocumentService.increment_chunk_num(task_doc_id, task_dataset_id, token_count, chunk_count, 0)
 
         if not await self._run_document_post_chunking_if_last(

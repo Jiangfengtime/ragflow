@@ -58,14 +58,14 @@ class TaskManager:
     async def run_refactored_task(
         cls,
         task: dict,
-        chat_limiter: Any,
-        minio_limiter: Any,
-        chunk_limiter: Any,
-        embed_limiter: Any,
-        kg_limiter: Any,
-        set_progress: Any,
-        has_canceled: Any,
-        billing_hook: Optional[BillingHook] = None,
+        chat_limiter: Any, # 限制同时调用 Chat/LLM 的数量。
+        minio_limiter: Any, # 限制同时读取 MinIO 的数量。
+        chunk_limiter: Any, # 限制同时解析、切分文档的数量。
+        embed_limiter: Any, # 限制同时调用 Embedding 模型的数量
+        kg_limiter: Any, # 限制同时执行知识图谱任务的数量
+        set_progress: Any, # 更新 MySQL 中任务进度和进度信息
+        has_canceled: Any, # 检查任务是否已被用户取消
+        billing_hook: Optional[BillingHook] = None, # 可选的计费回调，默认不传
     ) -> None:
         """Run a document processing task in production mode.
 
@@ -80,12 +80,14 @@ class TaskManager:
             has_canceled: Function to check if task is canceled.
             billing_hook: Optional billing hook for pipeline success/error callbacks.
         """
+        # 该方法是新版执行器的装配入口，本身不解析文件：它把 Redis/MySQL 得到的 task、
+        # 五类并发限流器、进度更新和取消检查统一包装成 TaskContext，再交给 TaskHandler。
         with recording_context_manager(_NULL_RECORDING_CONTEXT):
             # Use NullRecordingContext in production to avoid memory allocation
-            set_recording_context(_NULL_RECORDING_CONTEXT)
+            set_recording_context(_NULL_RECORDING_CONTEXT) # 创建无记录模式, 正常生产模式不保存新旧流程对比数据，减少内存消耗
 
             # Create TaskContext with all execution resources
-            task_context = TaskContext(
+            task_context = TaskContext( # 把零散参数封装成 TaskContext
                 task=task,
                 limiters=TaskLimiters(
                     chat=chat_limiter,
@@ -101,9 +103,10 @@ class TaskManager:
                 recording_context=_NULL_RECORDING_CONTEXT,
             )
 
-            # Execute with TaskHandler
+            # TaskHandler 通过 ctx 读取任务字段并使用绑定过 task_id/page range 的 progress_cb，
+            # 因而下游服务无需反复传递大量独立参数。
             handler = TaskHandler(ctx=task_context, billing_hook=billing_hook)
-            await handler.handle_task()
+            await handler.handle_task()  # 真正的业务处理入口。
 
     @classmethod
     async def dry_run_task(

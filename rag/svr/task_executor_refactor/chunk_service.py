@@ -136,8 +136,8 @@ class ChunkService:
     @timeout(60 * 80, 1)
     async def build_chunks(
         self,
-        storage_binary: bytes,
-        on_chunking_start=None,
+        storage_binary: bytes,  # 从对象存储读取的完整原文件二进制。
+        on_chunking_start=None,  # 取得 Chunk 并发许可后的回调，用于排除排队耗时。
     ) -> List[Dict[str, Any]]:
         """Build chunks from document binary.
 
@@ -156,6 +156,7 @@ class ChunkService:
         """
         ctx = self._task_context
         # Validate file size
+        # 这里使用的是 MySQL 文档记录中的 size，不是重新计算 len(storage_binary)
         if ctx.size > settings.DOC_MAXIMUM_SIZE:
             self._progress(prog=-1, msg="File size exceeds( <= %dMb )" % (int(settings.DOC_MAXIMUM_SIZE / 1024 / 1024)))
             self._task_context.recording_context.record("file_size_exceeded", True)
@@ -164,6 +165,7 @@ class ChunkService:
         ctx.recording_context.record("parser_id", ctx.parser_id)
 
         # Get parser
+        # 根据 parser_id 选择解析器
         chunker = get_parser(ctx.parser_id)
 
         # record config for compare
@@ -177,9 +179,11 @@ class ChunkService:
             "language": ctx.language,
             "layout_recognizer": ctx.parser_config.get("layout_recognizer"),
         }
+        # 记录当前任务的 Chunk 配置, 不落地, 只用于对比
         ctx.recording_context.record("chunk_config", chunk_config)
 
-        # Run chunking (delegated)
+        # 调用 parser 模块的 chunk()。解析器是同步且可能消耗大量 CPU，因此 run_chunking
+        # 会在 chunk_limiter 保护下把它放入线程池。返回的 cks 只是内存中的原始 Chunk。
         cks = await run_chunking(chunker, storage_binary, ctx, on_chunking_start)
 
         # Record raw chunks
@@ -188,7 +192,8 @@ class ChunkService:
         # Extract outline (delegated)
         await extract_outline(cks, ctx)
 
-        # Prepare docs and upload to MinIO
+        # 给每个 Chunk 补充 doc_id/kb_id、稳定 Chunk ID 和时间字段；如果 Chunk 携带图片，
+        # 图片写入对象存储，Chunk 中只保留可用于反查图片的 img_id。
         docs = await self._prepare_docs_and_upload(cks)
 
         # Record docs after prep
@@ -251,7 +256,7 @@ class ChunkService:
                     d["img_id"] = ""
                     docs.append(d)
                     return
-
+                # Chunk 图片写入 MinIO
                 await image2id(d, partial(settings.STORAGE_IMPL.put, tenant_id=ctx.tenant_id), d["id"], ctx.kb_id)
                 docs.append(d)
             except Exception:
@@ -303,6 +308,8 @@ class ChunkService:
         Returns:
             True if all chunks were inserted successfully, False otherwise.
         """
+        # 这里才进入 Chunk 的持久化阶段。docs/chunks 在此前始终只存在于 Worker 内存中。
+        # docStoreConn 是统一抽象；当前 DOC_ENGINE=elasticsearch 时实际调用 ESConnection.insert。
         doc_bulk_size = doc_bulk_size or settings.DOC_BULK_SIZE
 
         self._apply_document_availability(chunks)
@@ -403,6 +410,7 @@ class ChunkService:
                 return self._task_context.write_interceptor.intercept("docStoreConn.insert", [])
             return self._task_context.write_interceptor.intercept("docStoreConn.insert")
         else:
+            # 同步 doc engine 客户端放入线程池，避免阻塞 asyncio；返回空列表表示该批次成功。
             return await thread_pool_exec(settings.docStoreConn.insert, chunks, index_name, task_dataset_id, refresh)
 
     async def _insert_main_chunks(
@@ -420,6 +428,7 @@ class ChunkService:
         checkpoint_batches = max(1, 256 // doc_bulk_size)
         last_checkpoint = 0
         for b in range(0, len(chunks), doc_bulk_size):
+            # 每批同时写入 Chunk 文本、分词字段、页码/位置、doc_id/kb_id 和 Embedding 向量。
             doc_store_result = await self._intercept_doc_store_insert(chunks[b : b + doc_bulk_size], search.index_name(task_tenant_id), task_dataset_id, refresh=False)
 
             if self._task_context.has_canceled_func(task_id):
@@ -490,6 +499,7 @@ class ChunkService:
                 else:
                     self._task_context.write_interceptor.intercept("TaskService.update_chunk_ids")
             else:
+                # 保存当前 Task 已写入的 Chunk ID
                 TaskService.update_chunk_ids(task_id, " ".join(chunk_ids))
             return True
         except DoesNotExist:

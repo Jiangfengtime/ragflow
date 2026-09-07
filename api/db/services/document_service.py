@@ -1224,6 +1224,12 @@ class DocumentService(CommonService):
 
     @classmethod
     def run(cls, tenant_id: str, doc: dict, kb_table_num_map: dict):
+        """根据文档配置选择任务创建方式。
+
+        自定义 pipeline 文档进入 queue_dataflow；普通文档先通过 doc_id 查询
+        File2Document/Document 得到对象存储地址，再由 queue_tasks 按页或按行拆分任务。
+        这里仍然只是在“生产任务”，真正解析由独立 Task Executor 完成。
+        """
         from api.db.services.task_service import queue_dataflow, queue_tasks
         from api.db.services.file2document_service import File2DocumentService
 
@@ -1238,10 +1244,13 @@ class DocumentService(CommonService):
                 kb_table_num_map[kb_id] = count
                 if kb_table_num_map[kb_id] <= 0:
                     KnowledgebaseService.delete_field_map(kb_id)
+        # 有pipeline_id: 使用自定义 Ingestion Pipeline
         if doc.get("pipeline_id", ""):
             queue_dataflow(tenant_id, flow_id=doc["pipeline_id"], task_id=get_uuid(), doc_id=doc["id"])
         else:
+            # 根据 doc_id 找到对象存储的 bucket 和 object key。
             bucket, name = File2DocumentService.get_storage_address(doc_id=doc["id"])
+            # 创建 MySQL Task 记录并把未完成任务投递到 Redis Stream。
             queue_tasks(doc, bucket, name, 0)
 
 

@@ -104,11 +104,11 @@ class ModelTypeBinary(Enum):
 
 
 class TaskStatus(StrEnum):
-    UNSTART = "0"
-    RUNNING = "1"
-    CANCEL = "2"
-    DONE = "3"
-    FAIL = "4"
+    UNSTART = "0" # 未解析
+    RUNNING = "1" # 开始解析
+    CANCEL = "2" # 取消解析
+    DONE = "3" # 解析完成
+    FAIL = "4" # 解析失败
     SCHEDULE = "5"
 
 
