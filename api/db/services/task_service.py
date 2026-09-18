@@ -41,11 +41,11 @@ GRAPH_RAPTOR_FAKE_DOC_ID = "graph_raptor_x"
 TASK_MAX_LOG_LENGTH = int(os.environ.get("TASK_MAX_LOG_LENGTH", 3000))  # TEXT MAX 是 64 KiB 字节！
 DOC_CHUNKING_COUNTER_TTL_SECONDS = 7 * 24 * 3600
 
-
+# _doc_chunking_pending_key(doc_id) 生成 doc:chunking_pending:<doc_id>：记录还剩几个分块 Task。例如初始为 3，每完成一个减 1；减到 0 的任务负责执行后续的结构编译、RAPTOR 等文档级处理。
 def _doc_chunking_pending_key(doc_id: str) -> str:
     return f"doc:chunking_pending:{doc_id}"
 
-
+# _doc_chunking_aborted_key(doc_id) 生成 doc:chunking_aborted:<doc_id>：标记这轮分块已中止。
 def _doc_chunking_aborted_key(doc_id: str) -> str:
     return f"doc:chunking_aborted:{doc_id}"
 
@@ -637,12 +637,12 @@ def reuse_prev_task_chunks(task: dict, prev_tasks: list[dict], chunking_config: 
 
     return len(task["chunk_ids"].split())
 
-
+# 用来给该文档的所有解析 Task 发取消信号
 def cancel_all_task_of(doc_id):
-    abort_doc_chunking_counter(doc_id)
-    for t in TaskService.query(doc_id=doc_id):
+    abort_doc_chunking_counter(doc_id) # 清理该文档的分块任务计数器。
+    for t in TaskService.query(doc_id=doc_id): # 从 MySQL task 表查出该文档的任务
         try:
-            REDIS_CONN.set(f"{t.id}-cancel", "x")
+            REDIS_CONN.set(f"{t.id}-cancel", "x") # 为每个任务在 Redis 写入 <task_id>-cancel 标记
         except Exception as e:
             logging.exception(e)
 

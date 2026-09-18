@@ -236,6 +236,12 @@ def remove_field_name_prefix(field_name):
 
 
 class BaseModel(Model):
+    """所有业务表共享的时间字段。
+
+    create_time、update_time：创建/更新时间戳（毫秒）。
+    create_date、update_date：对应的日期时间值。
+    """
+
     create_time = BigIntegerField(null=True, index=True)
     create_date = DateTimeField(null=True, index=True)
     update_time = BigIntegerField(null=True, index=True)
@@ -1053,6 +1059,8 @@ def close_connection():
 
 
 class DataBaseModel(BaseModel):
+    """业务模型基类；子类通过 Meta.db_table 指定表名，共用 DB 数据库连接。"""
+
     class Meta:
         database = DB
 
@@ -1093,6 +1101,15 @@ def fill_db_model_object(model_object, human_model_dict):
 
 
 class User(DataBaseModel, AuthUser):
+    """用户表 user。
+
+    id：用户主键；email：登录邮箱；password：密码摘要；access_token：登录凭证。
+    nickname、avatar：展示信息；language、color_schema、timezone：界面偏好。
+    last_login_time：最近登录时间；login_channel：登录渠道。
+    is_authenticated、is_active、is_anonymous：认证及账号标志；is_superuser：管理员标志。
+    status：记录状态，1 有效、0 无效。
+    """
+
     SENSITIVE_FIELDS = {"password", "access_token", "email"}
 
     id = CharField(max_length=32, primary_key=True)
@@ -1140,6 +1157,15 @@ class User(DataBaseModel, AuthUser):
 
 # | `Tenant` | 数据与模型配置的主要隔离边界 |
 class Tenant(DataBaseModel):
+    """租户表 tenant，保存团队及默认模型配置。
+
+    id、name、public_key：租户主键、名称、公钥。
+    llm_id、embd_id、asr_id、img2txt_id、rerank_id、tts_id、ocr_id：各类型默认模型标识。
+    tenant_llm_id、tenant_embd_id、tenant_asr_id、tenant_img2txt_id、
+    tenant_rerank_id、tenant_tts_id、tenant_ocr_id：对应 tenant_model 记录的 ID。
+    parser_ids：可用文档处理器；credit：租户额度；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=100, null=True, help_text="Tenant name", index=True)
     public_key = CharField(max_length=255, null=True, index=True)
@@ -1169,6 +1195,12 @@ class Tenant(DataBaseModel):
 
 
 class UserTenant(DataBaseModel):
+    """用户与租户的成员关系表 user_tenant。
+
+    id：关系主键；user_id：用户 ID；tenant_id：租户 ID。
+    role：成员角色（如 OWNER、NORMAL）；invited_by：邀请人 ID；status：关系状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     user_id = CharField(max_length=32, null=False, index=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1181,6 +1213,12 @@ class UserTenant(DataBaseModel):
 
 
 class InvitationCode(DataBaseModel):
+    """团队邀请码表 invitation_code。
+
+    id：记录主键；code：邀请码；visit_time：访问时间。
+    user_id：关联用户；tenant_id：目标租户；status：邀请码状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     code = CharField(max_length=32, null=False, index=True)
     visit_time = DateTimeField(null=True, index=True)
@@ -1193,6 +1231,12 @@ class InvitationCode(DataBaseModel):
 
 
 class LLMFactories(DataBaseModel):
+    """模型供应商目录表 llm_factories。
+
+    name：供应商名称及主键；logo：标志；tags：支持的模型类型。
+    rank：展示排序；status：记录状态。
+    """
+
     name = CharField(max_length=128, null=False, help_text="LLM factory name", primary_key=True)
     logo = TextField(null=True, help_text="llm logo base64")
     tags = CharField(max_length=255, null=False, help_text="LLM, Text Embedding, Image2Text, ASR", index=True)
@@ -1207,6 +1251,13 @@ class LLMFactories(DataBaseModel):
 
 
 class LLM(DataBaseModel):
+    """系统模型目录表 llm，以 fid 与 llm_name 为联合主键。
+
+    fid：供应商 ID；llm_name：模型名称；model_type：模型类型。
+    max_tokens：最大 token 数；tags：能力标签；is_tools：是否支持工具调用。
+    status：记录状态。
+    """
+
     # LLMs dictionary
     llm_name = CharField(max_length=128, null=False, help_text="LLM name", index=True)
     model_type = CharField(max_length=128, null=False, help_text="LLM, Text Embedding, Image2Text, ASR", index=True)
@@ -1226,6 +1277,13 @@ class LLM(DataBaseModel):
 
 
 class TenantLLM(DataBaseModel):
+    """租户模型配置表 tenant_llm。
+
+    tenant_id：所属租户；llm_factory：供应商；model_type、llm_name：模型类型与名称。
+    api_key、api_base：调用凭证及服务地址；max_tokens：上下文 token 上限。
+    used_tokens：已使用 token 数；status：配置状态。
+    """
+
     tenant_id = CharField(max_length=32, null=False, index=True)
     llm_factory = CharField(max_length=128, null=False, help_text="LLM factory name", index=True)
     model_type = CharField(max_length=128, null=True, help_text="LLM, Text Embedding, Image2Text, ASR", index=True)
@@ -1245,6 +1303,11 @@ class TenantLLM(DataBaseModel):
 
 
 class TenantLangfuse(DataBaseModel):
+    """租户 Langfuse 连接配置表 tenant_langfuse。
+
+    tenant_id：租户 ID 及主键；secret_key、public_key：认证密钥；host：服务地址。
+    """
+
     tenant_id = CharField(max_length=32, null=False, primary_key=True)
     secret_key = CharField(max_length=2048, null=False, help_text="SECRET KEY")
     public_key = CharField(max_length=2048, null=False, help_text="PUBLIC KEY")
@@ -1259,6 +1322,25 @@ class TenantLangfuse(DataBaseModel):
 
 # `Knowledgebase` | 知识库/数据集，持有解析器、Embedding 等配置
 class Knowledgebase(DataBaseModel):
+    """知识库表 knowledgebase；保存元数据与解析/检索配置，不保存向量正文。
+
+    id：知识库主键；tenant_id：所属租户；created_by：创建者；name、avatar、
+    description、language：展示信息与语言。
+    embd_id、tenant_embd_id：Embedding 模型标识及 tenant_model 记录 ID。
+    permission：可见范围 me/team；doc_num、token_num、chunk_num：统计数量。
+    similarity_threshold、vector_similarity_weight：检索阈值与向量融合权重。
+    parser_id、parser_config：解析器及参数；pipeline_id：关联流水线；pagerank：排序权重。
+    graphrag_task_id、raptor_task_id、mindmap_task_id、wiki_task_id、skill_task_id：
+    各类知识库任务 ID；graphrag_task_finish_at、raptor_task_finish_at、
+    mindmap_task_finish_at、wiki_task_finish_at、skill_task_finish_at：对应完成时间。
+    structure_graph_task_id、structure_mindmap_task_id、timeline_task_id、
+    session_graph_task_id、session_essence_task_id、structure_task_id：结构合并任务 ID；
+    structure_graph_task_finish_at、structure_mindmap_task_finish_at、
+    timeline_task_finish_at、session_graph_task_finish_at、
+    session_essence_task_finish_at、structure_task_finish_at：对应完成时间。
+    status：知识库记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1319,6 +1401,17 @@ class Knowledgebase(DataBaseModel):
 
 # `Document` | 文档元数据及解析状态，不保存完整文件二进制
 class Document(DataBaseModel):
+    """文档表 document；保存文件元数据与解析进度，原文件在对象存储中。
+
+    id：文档主键；kb_id：所属知识库；created_by：上传者。
+    name、type、suffix、size：文件名、文档类型、实际后缀及字节大小。
+    location：原文件存储位置；thumbnail：缩略图信息；source_type：文件来源。
+    parser_id、parser_config、pipeline_id：解析器、解析配置和流水线 ID。
+    token_num、chunk_num：解析后的 token 与 chunk 数；content_hash：内容哈希。
+    progress、progress_msg、process_begin_at、process_duration：解析进度、消息、
+    开始时间及耗时；run：解析控制状态（0 未解析、1 运行、2 取消）；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     thumbnail = TextField(null=True, help_text="thumbnail base64 string")
     kb_id = CharField(max_length=256, null=False, index=True)
@@ -1350,6 +1443,13 @@ class Document(DataBaseModel):
 
 # `File` | 文件管理器中的目录与文件节点
 class File(DataBaseModel):
+    """文件管理节点表 file，可表示目录或文件。
+
+    id：节点主键；parent_id：父目录；tenant_id：所属租户；created_by：创建者。
+    name：文件或目录名；location：对象存储位置；size：字节大小。
+    type：文件类型；source_type：文件来源。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     parent_id = CharField(max_length=32, null=False, help_text="parent folder id", index=True)
     tenant_id = CharField(max_length=32, null=False, help_text="tenant id", index=True)
@@ -1368,6 +1468,11 @@ class File(DataBaseModel):
 
 # `File2Document` | 文件对象与知识库文档的关联
 class File2Document(DataBaseModel):
+    """文件节点与知识库文档的关联表 file2document。
+
+    id：关系主键；file_id：file.id；document_id：document.id。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     file_id = CharField(max_length=32, null=True, help_text="file id", index=True)
     document_id = CharField(max_length=32, null=True, help_text="document id", index=True)
@@ -1377,6 +1482,13 @@ class File2Document(DataBaseModel):
 
 
 class FileCommit(DataBaseModel):
+    """文件夹或页面的提交记录表 file_commit。
+
+    id：提交主键；folder_id：工作区目录；parent_id：上一提交；author_id：提交人。
+    message：提交说明；file_count：文件数；tree_state：目录树 JSON 快照。
+    title、comments：页面编辑提交的标题和正文。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     folder_id = CharField(max_length=32, null=False, help_text="workspace folder id", index=True)
     parent_id = CharField(max_length=32, null=True, help_text="parent commit id", index=True)
@@ -1397,6 +1509,15 @@ class FileCommit(DataBaseModel):
 
 
 class FileCommitItem(DataBaseModel):
+    """单次提交内的文件变更表 file_commit_item。
+
+    id：明细主键；commit_id：所属提交；file_id：变更文件；operation：增改删/重命名。
+    old_hash、new_hash：变更前后内容哈希；old_location、new_location：存储位置。
+    old_name、new_name：重命名前后名称；diff：页面变更差异文本。
+    content_after_storage、content_after_location：变更后内容的存储后端与位置。
+    slug_kwd、page_type_kwd：页面标识及页面类型。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     commit_id = CharField(max_length=32, null=False, help_text="commit id", index=True)
     file_id = CharField(max_length=32, null=False, help_text="file id", index=True)
@@ -1432,6 +1553,14 @@ class FileCommitItem(DataBaseModel):
 
 # `Task` | 文档解析任务，可按页或表格范围拆分
 class Task(DataBaseModel):
+    """文档解析任务表 task，可将一个文档拆成多个页范围任务。
+
+    id：任务主键；doc_id：文档 ID；from_page、to_page：处理页范围。
+    task_type：任务类别，空串代表普通解析任务；priority：任务优先级。
+    begin_at、process_duration：开始时间与耗时；progress、progress_msg：进度与消息。
+    retry_count：重试次数；digest：任务摘要；chunk_ids：生成的 chunk ID 列表文本。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     doc_id = CharField(max_length=32, null=False, index=True)
     from_page = IntegerField(default=0)
@@ -1459,6 +1588,18 @@ class Task(DataBaseModel):
 
 # `Dialog` | 聊天助手配置，包括知识库、模型、阈值和提示词
 class Dialog(DataBaseModel):
+    """聊天助手表 dialog，保存模型、提示词与知识库检索配置。
+
+    id：助手主键；tenant_id：所属租户；name、description、icon、language：展示信息。
+    llm_id、tenant_llm_id：生成模型及 tenant_model 记录 ID；llm_setting：生成参数。
+    prompt_type、prompt_config：提示词模式及内容；meta_data_filter：元数据筛选条件。
+    similarity_threshold、vector_similarity_weight：召回阈值及向量权重。
+    top_n：返回给回答环节的结果数；rerank_candidates_count：重排候选数；
+    top_k：检索候选数；do_refer：是否在答案中附引用。
+    rerank_id、tenant_rerank_id：重排模型及 tenant_model 记录 ID。
+    kb_ids：关联知识库 ID 列表；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
     name = CharField(max_length=255, null=True, help_text="dialog application name", index=True)
@@ -1499,6 +1640,12 @@ class Dialog(DataBaseModel):
 
 # `Conversation` | 具体会话与消息历史
 class Conversation(DataBaseModel):
+    """界面聊天会话表 conversation。
+
+    id：会话主键；dialog_id：所属聊天助手；name：会话名称。
+    message：消息历史 JSON；reference：引用信息 JSON；user_id：会话用户 ID。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     dialog_id = CharField(max_length=32, null=False, index=True)
     name = CharField(max_length=255, null=True, help_text="conversation name", index=True)
@@ -1511,6 +1658,12 @@ class Conversation(DataBaseModel):
 
 
 class APIToken(DataBaseModel):
+    """API 访问令牌表 api_token，以 tenant_id 与 token 为联合主键。
+
+    tenant_id：所属租户；token：访问令牌；dialog_id：可选的助手 ID。
+    source：令牌来源类型；beta：扩展标识。
+    """
+
     tenant_id = CharField(max_length=32, null=False, index=True)
     token = CharField(max_length=255, null=False, index=True)
     dialog_id = CharField(max_length=32, null=True, index=True)
@@ -1523,6 +1676,14 @@ class APIToken(DataBaseModel):
 
 
 class API4Conversation(DataBaseModel):
+    """通过 API 访问的会话表 api_4_conversation。
+
+    id：会话主键；name：名称；dialog_id：关联助手；user_id、exp_user_id：用户标识。
+    message、reference：消息及引用 JSON；tokens：累计 token 数；source：来源类型。
+    dsl：会话关联的流程定义；duration：耗时；round：轮次；thumb_up：反馈计数。
+    errors：错误信息；version_title：会话创建时的画布版本标题。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=255, null=True, help_text="conversation name", index=False)
     dialog_id = CharField(max_length=32, null=False, index=True)
@@ -1544,6 +1705,14 @@ class API4Conversation(DataBaseModel):
 
 
 class UserCanvas(DataBaseModel):
+    """用户创建的智能体/数据流画布表 user_canvas。
+
+    id：画布主键；user_id：创建用户；title、avatar、description：展示信息。
+    permission：可见范围 me/team；release：是否发布；canvas_type：画布类型。
+    canvas_category：agent_canvas 或 dataflow_canvas；tags：逗号分隔的标签。
+    dsl：画布节点与连线的流程定义 JSON。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
     user_id = CharField(max_length=255, null=False, help_text="user_id", index=True)
@@ -1568,6 +1737,12 @@ class UserCanvas(DataBaseModel):
 
 
 class CanvasTemplate(DataBaseModel):
+    """智能体/数据流模板表 canvas_template。
+
+    id：模板主键；title、description：多语言展示信息 JSON；avatar：图标。
+    canvas_type、canvas_types：模板类型；canvas_category：画布类别；dsl：模板流程定义。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
     title = JSONField(null=True, default=dict, help_text="Canvas title")
@@ -1582,6 +1757,12 @@ class CanvasTemplate(DataBaseModel):
 
 
 class UserCanvasVersion(DataBaseModel):
+    """用户画布版本表 user_canvas_version。
+
+    id：版本主键；user_canvas_id：所属画布；title、description：版本展示信息。
+    release：是否发布；dsl：该版本的流程定义 JSON。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     user_canvas_id = CharField(max_length=255, null=False, help_text="user_canvas_id", index=True)
 
@@ -1595,6 +1776,12 @@ class UserCanvasVersion(DataBaseModel):
 
 
 class MCPServer(DataBaseModel):
+    """租户配置的 MCP 服务表 mcp_server。
+
+    id：配置主键；tenant_id：所属租户；name、description：服务名称及描述。
+    url：服务地址；server_type：服务类型；variables：变量 JSON；headers：请求头 JSON。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=255, null=False, help_text="MCP Server name")
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1609,6 +1796,13 @@ class MCPServer(DataBaseModel):
 
 
 class CompilationTemplate(DataBaseModel):
+    """内容编译模板表 compilation_template。
+
+    id：模板主键；tenant_id：所属租户，可为空；group_id：模板分组。
+    name、description：名称与说明；kind：模板种类；config：模板配置 JSON。
+    is_builtin：是否内置；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=True, index=True)
     group_id = CharField(max_length=32, null=True, index=True)
@@ -1625,6 +1819,12 @@ class CompilationTemplate(DataBaseModel):
 
 
 class CompilationTemplateGroup(DataBaseModel):
+    """内容编译模板分组表 compilation_template_group。
+
+    id：分组主键；tenant_id：所属租户；name、description：名称与说明。
+    scope：适用范围 file/dataset；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
     name = CharField(max_length=128, null=False, index=True)
@@ -1637,6 +1837,13 @@ class CompilationTemplateGroup(DataBaseModel):
 
 
 class Search(DataBaseModel):
+    """已保存的搜索配置表 search。
+
+    id：配置主键；tenant_id：所属租户；created_by：创建者。
+    name、avatar、description：展示信息；search_config：知识库范围、阈值、
+    重排及聊天选项等 JSON 配置；status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     avatar = TextField(null=True, help_text="avatar base64 string")
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1685,6 +1892,16 @@ class Search(DataBaseModel):
 
 
 class PipelineOperationLog(DataBaseModel):
+    """文档流水线操作记录表 pipeline_operation_log。
+
+    id：日志主键；document_id、document_name、document_suffix、document_type：文档标识及信息。
+    tenant_id、kb_id：所属租户与知识库；pipeline_id、pipeline_title：流水线信息。
+    parser_id：解析器；source_from：文档来源；dsl：本次执行的流程定义 JSON。
+    task_type：任务类别；operation_status：操作状态；avatar：展示图标。
+    progress、progress_msg、process_begin_at、process_duration：进度、消息、开始时间与耗时。
+    status：记录状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     document_id = CharField(max_length=32, index=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1711,6 +1928,14 @@ class PipelineOperationLog(DataBaseModel):
 
 
 class Connector(DataBaseModel):
+    """外部数据源连接器表 connector。
+
+    id：连接器主键；tenant_id：所属租户；name：名称；source：数据源类型。
+    input_type：输入方式；config：连接及同步配置 JSON。
+    refresh_freq：刷新频率；prune_freq：清理频率；timeout_secs：超时时长（秒）。
+    indexing_start：索引开始时间；status：连接器调度状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
     name = CharField(max_length=128, null=False, help_text="Search name", index=False)
@@ -1731,6 +1956,12 @@ class Connector(DataBaseModel):
 
 
 class Connector2Kb(DataBaseModel):
+    """连接器与知识库关联表 connector2kb。
+
+    id：关系主键；connector_id：连接器 ID；kb_id：目标知识库 ID。
+    auto_parse：同步后是否自动解析文档。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     connector_id = CharField(max_length=32, null=False, index=True)
     kb_id = CharField(max_length=32, null=False, index=True)
@@ -1741,6 +1972,12 @@ class Connector2Kb(DataBaseModel):
 
 
 class ChatChannel(DataBaseModel):
+    """外部聊天渠道接入表 chat_channel。
+
+    id：渠道主键；tenant_id：所属租户；name：机器人名称；channel：渠道类型。
+    config：渠道凭证及配置 JSON；chat_id：关联聊天助手 ID；status：渠道状态。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     tenant_id = CharField(max_length=32, null=False, index=True)
     name = CharField(max_length=128, null=False, help_text="Bot name", index=False)
@@ -1788,6 +2025,16 @@ class DateTimeTzField(CharField):
 
 
 class SyncLogs(DataBaseModel):
+    """连接器同步记录表 sync_logs。
+
+    id：同步记录主键；connector_id：连接器 ID；kb_id：目标知识库 ID。
+    task_type：同步任务类别；status：处理状态；from_beginning：是否从头同步。
+    new_docs_indexed、total_docs_indexed：本次新增及累计索引文档数。
+    docs_removed_from_index：从索引移除的文档数；error_count：错误数量。
+    error_msg、full_exception_trace：错误消息及异常堆栈；time_started：开始时间。
+    poll_range_start、poll_range_end：本次轮询覆盖的时间范围。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     connector_id = CharField(max_length=32, index=True)
     task_type = CharField(max_length=32, null=False, default="sync", index=True)
@@ -1815,6 +2062,16 @@ class SyncLogs(DataBaseModel):
 
 
 class Memory(DataBaseModel):
+    """记忆库表 memory，保存记忆类型、权限及模型配置。
+
+    id：记忆库主键；tenant_id：所属租户；name、avatar、description：展示信息。
+    memory_type：位标志，1 原始、2 语义、4 情景、8 程序性记忆，可组合。
+    storage_type：存储形态 table/graph；embd_id、llm_id：Embedding 与聊天模型。
+    tenant_embd_id、tenant_llm_id：对应 tenant_model 记录 ID。
+    permissions：可见范围 me/team；memory_size：记忆容量；forgetting_policy：遗忘策略。
+    temperature、system_prompt、user_prompt：记忆处理时的模型参数与提示词。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=128, null=False, index=False, help_text="Memory name")
     avatar = TextField(null=True, help_text="avatar base64 string")
@@ -1840,6 +2097,12 @@ class Memory(DataBaseModel):
 
 
 class SystemSettings(DataBaseModel):
+    """系统配置表 system_settings。
+
+    name：配置项名称及主键；source：配置来源；data_type：值的数据类型。
+    value：配置值文本，可包含 JSON。
+    """
+
     name = CharField(max_length=128, primary_key=True)
     source = CharField(max_length=32, null=False, index=False)
     data_type = CharField(max_length=32, null=False, index=False)
@@ -1853,6 +2116,12 @@ class SystemSettings(DataBaseModel):
 
 
 class TenantModelProvider(DataBaseModel):
+    """租户模型供应商表 tenant_model_provider。
+
+    id：供应商记录主键；tenant_id：所属租户；provider_name：供应商名称。
+    同一租户内 provider_name 唯一。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     provider_name = CharField(max_length=128, null=False, index=False, help_text="LLM provider name")
     tenant_id = CharField(max_length=32, null=False, index=True)
@@ -1863,6 +2132,12 @@ class TenantModelProvider(DataBaseModel):
 
 
 class TenantModelInstance(DataBaseModel):
+    """模型服务实例表 tenant_model_instance。
+
+    id：实例主键；instance_name：实例名称；provider_id：tenant_model_provider.id。
+    api_key：调用凭证字段；status：实例状态；extra：扩展配置文本。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     instance_name = CharField(max_length=128, null=False, index=False, help_text="Model instance name")
     provider_id = CharField(max_length=32, null=False, index=False)
@@ -1875,6 +2150,14 @@ class TenantModelInstance(DataBaseModel):
 
 
 class TenantModel(DataBaseModel):
+    """租户可用模型表 tenant_model。
+
+    id：模型记录主键；model_name：模型名称；provider_id：供应商记录 ID。
+    instance_id：服务实例 ID；model_type：位标志，1 聊天、2 Embedding、
+    4 ASR、8 视觉、16 重排、32 TTS、64 OCR，可组合。
+    status：模型状态；extra：扩展配置文本。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     model_name = CharField(max_length=128, null=True, index=False, help_text="Model name")
     provider_id = CharField(max_length=32, null=False, index=False)
@@ -1888,6 +2171,12 @@ class TenantModel(DataBaseModel):
 
 
 class TenantModelGroup(DataBaseModel):
+    """模型路由分组表 tenant_model_group。
+
+    id：分组主键；group_type：分组类型；model_name：对外模型名称。
+    strategy：路由策略，默认 weighted。
+    """
+
     id = CharField(max_length=32, primary_key=True)
     group_type = CharField(max_length=32, null=False, index=False, help_text="Group type")
     model_name = CharField(max_length=128, null=True, index=False, help_text="Model name")
@@ -1898,6 +2187,12 @@ class TenantModelGroup(DataBaseModel):
 
 
 class TenantModelGroupMapping(DataBaseModel):
+    """模型路由分组成员表 tenant_model_group_mapping。
+
+    group_id、provider_id、instance_id、model_id：联合主键，定位组内模型实例。
+    weight：路由权重；status：成员状态。
+    """
+
     group_id = CharField(max_length=32, null=False, index=True, help_text="Group ID")
     provider_id = CharField(max_length=32, null=False, index=False)
     instance_id = CharField(max_length=32, null=False, index=False)

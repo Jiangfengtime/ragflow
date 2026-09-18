@@ -533,6 +533,7 @@ async def upload_document(dataset_id, tenant_id):
     # 上传成功返回的 document.id 是后续 ingest、Task、Chunk、检索结果贯穿全链路的 doc_id；
     # 文件名仅用于显示和生成对象 key，不承担关系主键职责。
     # 根据上传类型分流：local=本地文件，web=网页转 PDF，empty=空白文档。
+    # request 是 Quart 的上下文代理对象，会自动关联当前正在处理的 HTTP 请求，不需要作为函数参数传入。
     upload_type = (request.args.get("type") or "local").lower()
 
     # 查询知识库, 获得知识库配置
@@ -613,7 +614,7 @@ async def _upload_web_document(dataset_id, kb, tenant_id):
             "name": filename,
             "location": location,
             "size": len(blob),
-            "thumbnail": thumbnail(filename, blob),
+            "thumbnail": thumbnail(filename, blob), # 通过Base64将缩略图存储在thumbnail字段
             "suffix": Path(filename).suffix.lstrip("."),
         }
         if doc["type"] == FileType.VISUAL:
@@ -696,7 +697,7 @@ async def _upload_local_documents(kb, tenant_id):
 
     # 从表单数据中解析可选的 parser_config 覆盖
     parser_config_override = None
-    raw_parser_config = form.get("parser_config")
+    raw_parser_config = form.get("parser_config") # todo 这是什么
     if raw_parser_config:
         try:
             parsed = json.loads(raw_parser_config)
@@ -1512,7 +1513,7 @@ def _run_sync(user_id: str, req):
     kb_table_num_map = {}
     for doc_id in req["doc_ids"]:
         info = {"run": str(req["run"]), "progress": 0}  # 构造文档状态
-        rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False)
+        rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False) # 是否删除
         # 如果是“重新解析并删除旧结果”，重置数据：
         if rerun_with_delete:
             info["progress_msg"] = ""
@@ -1530,7 +1531,7 @@ def _run_sync(user_id: str, req):
         if str(req["run"]) == TaskStatus.CANCEL.value:
             tasks = list(TaskService.query(doc_id=doc_id))
             has_unfinished_task = any((task.progress or 0) < 1 for task in tasks)
-            if str(doc.run) in [TaskStatus.RUNNING.value, TaskStatus.CANCEL.value] or has_unfinished_task:
+            if str(doc.run) in [TaskStatus.RUNNING.value, TaskStatus.CANCEL.value] or has_unfinished_task: # run: 0-尚未解析, 1-开始解析, 2-取消解析
                 # 取消任务
                 cancel_all_task_of(doc_id)
                 # 附加 "stopped by user" 标记，以便保留历史记录并

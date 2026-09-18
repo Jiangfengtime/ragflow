@@ -605,10 +605,10 @@ class FileService(CommonService):
             parent_path: 可选的对象 key 前缀；会先做路径清洗，不能越出知识库目录。
             parser_config_override: 仅允许上传表格时覆盖的解析配置，合并后写入 Document。
         """
-        root_folder = self.get_root_folder(user_id)
+        root_folder = self.get_root_folder(user_id) # 获取上传用户对应的文件管理根目录
         pf_id = root_folder["id"]
         self.init_knowledgebase_docs(pf_id, user_id)
-        kb_root_folder = self.get_kb_folder(user_id)
+        kb_root_folder = self.get_kb_folder(user_id) # 在 MySQL 的 file 表中查找这个目录；如果不存在，就创建后返回。后续代码再在 .knowledgebase 下创建当前知识库对应的文件夹
         kb_folder = self.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
 
         safe_parent_path = sanitize_path(parent_path)
@@ -626,8 +626,8 @@ class FileService(CommonService):
             # ES Chunk.doc_id 以及最终检索结果中的 doc_id 都使用它进行关联。
             doc_id = file.id if hasattr(file, "id") else get_uuid()
             e, doc = DocumentService.get_by_id(doc_id)
-            if e and str(doc.kb_id) != str(kb.id):
-                if not self._discard_orphaned_document(doc):
+            if e and str(doc.kb_id) != str(kb.id): # doc_id已存在, 且不属于当前知识库
+                if not self._discard_orphaned_document(doc):  # 判断doc_id对应的文件还未被遗弃, 则不覆盖, 跳过
                     logger.warning(
                         "检测到 %s 的现有文档 ID 冲突：属于 知识库ID=%s，传入 知识库ID=%s。跳过更新以避免交叉 KB 覆盖。",
                         doc_id,
@@ -665,7 +665,7 @@ class FileService(CommonService):
                     err.append(file.filename + ": " + str(exc))
                 continue
             try:
-                DocumentService.check_doc_health(kb.tenant_id, file.filename)
+                DocumentService.check_doc_health(kb.tenant_id, file.filename) # 用户文件数量 和 文件名称长度校验
                 filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id)  # 处理重复名称, 如果同一知识库中已经存在相同文件名，系统会生成一个不冲突的新名称
                 # 判断文件类型
                 filetype = filename_type(filename)
@@ -720,8 +720,8 @@ class FileService(CommonService):
                 # 先写 Document 元数据，再建立文件管理记录和 File2Document 关系。
                 # 关联依赖显式 ID/字段而非文件名：Document.id=doc_id，Document.kb_id/location
                 # 指向对象存储，File2Document.file_id/document_id 连接文件树与知识库文档。
-                DocumentService.insert(doc)
-                FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
+                DocumentService.insert(doc) # 通过 Peewee 把 doc 字典写入 MySQL 的 document 表，保存文档 ID、知识库 ID、文件名、MinIO 位置、大小、解析配置等元数据。
+                FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id) # 把刚创建的文档接入文件管理器的目录树，不是再次上传文件。
                 logger.info(
                     "文档存储记录已创建 文档ID=%s 知识库ID=%s 存储位置=%s 文件类型=%s 文件大小=%d 是否有缩略图=%s",
                     doc_id,
