@@ -66,6 +66,8 @@ async def create_or_upload(tenant_id: str = None):
     content_type = request.content_type or ""
     try:
         if "multipart/form-data" in content_type:
+            # 文件管理上传只创建 File 节点并写对象存储；不会自动创建知识库 Document。
+            # 只有 /files/link-to-datasets 才会建立 File2Document 关系。
             form = await request.form
             pf_id = form.get("parent_id")
             files = await request.files
@@ -76,8 +78,20 @@ async def create_or_upload(tenant_id: str = None):
                 if file_obj.filename == "":
                     return get_error_argument_result("No file selected!")
 
+            logging.info(
+                "工作区文件上传已开始 租户ID=%s 父目录ID=%s 文件数=%d",
+                tenant_id,
+                pf_id or "root",
+                len(file_objs),
+            )
             success, result = await file_api_service.upload_file(tenant_id, pf_id, file_objs)
             if success:
+                logging.info(
+                    "工作区文件上传完成 租户ID=%s 父目录ID=%s 文件数=%d",
+                    tenant_id,
+                    pf_id or "root",
+                    len(file_objs),
+                )
                 return get_result(data=result)
             else:
                 return get_error_data_result(message=result)
@@ -88,6 +102,12 @@ async def create_or_upload(tenant_id: str = None):
 
             success, result = await file_api_service.create_folder(tenant_id, req["name"], req.get("parent_id"), req.get("type"))
             if success:
+                logging.info(
+                    "工作区文件夹已创建 租户ID=%s 父目录ID=%s 文件夹ID=%s",
+                    tenant_id,
+                    req.get("parent_id") or "root",
+                    result.get("id", "-") if isinstance(result, dict) else "-",
+                )
                 return get_result(data=result)
             else:
                 return get_error_data_result(message=result)
@@ -185,10 +205,14 @@ async def delete(tenant_id: str = None):
         return get_error_argument_result(err)
 
     try:
-        # Get Authorization header to pass to Go backend
+        # Service 负责递归展开目录，并协调 File 元数据、对象存储以及可能存在的
+        # File2Document/Document 关系；因此删除不能只操作 file 表。
+        logging.info("工作区文件删除已开始 租户ID=%s 文件ID列表=%s", tenant_id, req["ids"])
+        # 获取授权标头传递给 Go 后端
         auth_header = request.headers.get("Authorization", "")
         success, result = await file_api_service.delete_files(tenant_id, req["ids"], auth_header)
         if success:
+            logging.info("工作区文件删除完成 租户ID=%s 请求删除数=%d", tenant_id, len(req["ids"]))
             return get_result(data=result)
         else:
             if isinstance(result, dict):
@@ -249,8 +273,18 @@ async def move(tenant_id: str = None):
         return get_error_argument_result(err)
 
     try:
+        # rename-only 只改 MySQL File.name；对象 key 仍由 File.location 标识，
+        # 因此下载不依赖当前显示名称。
+        logging.info(
+            "工作区文件移动已开始 租户ID=%s 源文件ID列表=%s 目标目录ID=%s 是否重命名=%s",
+            tenant_id,
+            req["src_file_ids"],
+            req.get("dest_file_id") or "same-parent",
+            bool(req.get("new_name")),
+        )
         success, result = await file_api_service.move_files(tenant_id, req["src_file_ids"], req.get("dest_file_id"), req.get("new_name"))
         if success:
+            logging.info("工作区文件移动完成 租户ID=%s 源文件数=%d", tenant_id, len(req["src_file_ids"]))
             return get_result(data=result)
         else:
             return get_error_data_result(message=result)
@@ -288,17 +322,29 @@ async def download(tenant_id: str = None, file_id: str = None):
             return get_error_data_result(message=result)
 
         file = result
+        # 文件管理对象的主地址是 File.parent_id + File.location。历史或知识库关联文件
+        # 可能只保留 Document 地址，因此主地址未命中时再通过 File2Document 回退。
+        storage_source = "file"
         blob = await thread_pool_exec(settings.STORAGE_IMPL.get, file.parent_id, file.location)
         if not blob:
+            storage_source = "document_fallback"
             b, n = File2DocumentService.get_storage_address(file_id=file_id)
             blob = await thread_pool_exec(settings.STORAGE_IMPL.get, b, n)
         if not blob:
             logging.warning(
-                "Download failed: empty blob after primary+fallback lookup (tenant_id=%s, file_id=%s)",
+                "下载失败：主要+后备查找后为空 blob (租户ID=%s、文件ID=%s)",
                 tenant_id,
                 file_id,
             )
             return get_error_data_result(message="This file is empty.")
+
+        logging.info(
+            "工作区文件下载地址已解析 租户ID=%s 文件ID=%s 存储来源=%s 文件大小=%d",
+            tenant_id,
+            file_id,
+            storage_source,
+            len(blob),
+        )
 
         response = await make_response(blob)
         ext = re.search(r"\.([^.]+)$", file.name.lower())

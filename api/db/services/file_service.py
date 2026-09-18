@@ -46,27 +46,28 @@ from rag.llm.cv_model import GptV4
 
 
 class FileService(CommonService):
-    # Service class for managing file operations and storage
+    # Service 用于管理文件操作和存储的类
     model = File
 
     @classmethod
     @DB.connection_context()
     def get_by_pf_id(cls, tenant_id, pf_id, page_number, items_per_page, orderby, desc, keywords, exclude_skills):
-        # Get files by parent folder ID with pagination and filtering
-        # Args:
-        #     tenant_id: ID of the tenant
-        #     pf_id: Parent folder ID
-        #     page_number: Page number for pagination
-        #     items_per_page: Number of items per page
-        #     orderby: Field to order by
-        #     desc: Boolean indicating descending order
-        #     keywords: Search keywords
-        #     exclude_skills: Whether to exclude the skills folder directly under pf_id
-        # Returns:
-        #     Tuple of (file_list, total_count)
+        # 通过父文件夹 ID 获取文件，具有分页和过滤功能
+        # 参数：
+        # tenant_id：租户的ID
+        # pf_id：父文件夹 ID
+        # page_number：分页的页码
+        # items_per_page：每页的项目数
+        # orderby：排序依据字段
+        # desc：表示降序的布尔值
+        # 关键字： Search 关键字
+        # exclude_skills：是否排除pf_id直属下的技能文件夹
+        # 返回：
+        # (file_list、total_count) 的元组
         if keywords:
-            # Keyword search covers the whole subtree under pf_id so files and
-            # folders nested in sub-folders can be found too.
+            # 关键字搜索覆盖pf_id so文件下的整个子树并且
+            # 也可以找到嵌套在子文件夹中的
+            # 文件夹。
             subtree_ids = cls.get_subtree_ids(tenant_id, pf_id)
             files = cls.model.select().where(
                 (cls.model.tenant_id == tenant_id), (cls.model.parent_id.in_(subtree_ids)), (fn.LOWER(cls.model.name).contains(keywords.lower())), ~(cls.model.id == pf_id)
@@ -84,8 +85,8 @@ class FileService(CommonService):
         files = files.paginate(page_number, items_per_page)
 
         res_files = list(files.dicts())
-        # Deduplicate by file ID as a safety net against any leftover duplicate rows
-        # (e.g. duplicate 'skills' or '.knowledgebase' folders created by race conditions).
+        # 通过文件 ID 进行重复数据删除，作为针对任何剩余重复行的安全网
+        # （e.g。由竞争条件创建的重复 'skills' 或 '.knowledgebase' 文件夹）。
         seen_ids = set()
         unique_files = []
         for file in res_files:
@@ -116,8 +117,8 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_subtree_ids(cls, tenant_id, pf_id):
-        # Return pf_id itself plus the IDs of all entries nested under it
-        # (folders and files), used to scope recursive keyword searches.
+        # 返回 pf_id 本身以及嵌套在其下的所有条目的 IDs
+        # （文件夹和文件），用于确定递归关键字搜索的范围。
         rows = list(cls.model.select(cls.model.id, cls.model.parent_id).where(cls.model.tenant_id == tenant_id).dicts())
         children = {}
         for row in rows:
@@ -139,11 +140,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_kb_id_by_file_id(cls, file_id):
-        # Get dataset IDs associated with a file
-        # Args:
-        #     file_id: File ID
-        # Returns:
-        #     List of dictionaries containing dataset IDs and names
+        # 获取与文件关联的数据集 IDs
+        # 参数：
+        # file_id：File ID
+        # 返回：
+        # 包含数据集 IDs 和名称的字典列表
         kbs = (
             cls.model.select(*[Knowledgebase.id, Knowledgebase.name, File2Document.document_id])
             .join(File2Document, on=(File2Document.file_id == file_id))
@@ -161,12 +162,12 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_by_pf_id_name(cls, id, name):
-        # Get file by parent folder ID and name
-        # Args:
-        #     id: Parent folder ID
-        #     name: File name
-        # Returns:
-        #     File object or None if not found
+        # 通过父文件夹 ID 和名称获取文件
+        # 参数：
+        # id：父文件夹 ID
+        # 名称： File 名称
+        # 返回：
+        # File 对象，如果未找到则为 None
         file = cls.model.select().where((cls.model.parent_id == id) & (cls.model.name == name))
         if file.count():
             e, file = cls.get_by_id(file[0].id)
@@ -178,14 +179,14 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_id_list_by_id(cls, id, name, count, res):
-        # Recursively get list of file IDs by traversing folder structure
-        # Args:
-        #     id: Starting folder ID
-        #     name: List of folder names to traverse
-        #     count: Current depth in traversal
-        #     res: List to store results
-        # Returns:
-        #     List of file IDs
+        # 通过遍历文件夹结构递归获取文件列表 IDs
+        # 参数：
+        # id：起始文件夹 ID
+        # name：要遍历的文件夹名称列表
+        # count：当前遍历深度
+        # res：存储结果的列表
+        # 返回：
+        # 文件列表 IDs
         if count < len(name):
             file = cls.get_by_pf_id_name(id, name[count])
             if file:
@@ -199,12 +200,12 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_all_innermost_file_ids(cls, folder_id, result_ids):
-        # Get IDs of all files in the deepest level of folders
-        # Args:
-        #     folder_id: Starting folder ID
-        #     result_ids: List to store results
-        # Returns:
-        #     List of file IDs
+        # 获取最深层文件夹所有文件的IDs
+        # 参数：
+        # folder_id：启动文件夹 ID
+        # result_ids：存储结果的列表
+        # 返回：
+        # 文件列表 IDs
         subfiles = cls.model.select().where((cls.model.parent_id == folder_id) & (cls.model.id != folder_id))
         for subfile in subfiles:
             if subfile.type == FileType.FOLDER.value:
@@ -233,16 +234,16 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def create_folder(cls, file, parent_id, name, count, tenant_id, created_by):
-        # Recursively create folder structure
-        # Args:
-        #     file: Current file object
-        #     parent_id: Parent folder ID
-        #     name: List of folder names to create
-        #     count: Current depth in creation
-        #     tenant_id: Tenant ID
-        #     created_by: Created by user ID
-        # Returns:
-        #     Created file object
+        # 递归创建文件夹结构
+        # 参数：
+        # file：当前文件对象
+        # parent_id：父文件夹 ID
+        # name：要创建的文件夹名称列表
+        # 计数：当前创作深度
+        # tenant_id：租户 ID
+        # created_by：由用户 ID 创建
+        # 返回：
+        # 创建文件对象
         if count > len(name) - 2:
             return file
         else:
@@ -254,11 +255,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def is_parent_folder_exist(cls, parent_id):
-        # Check if parent folder exists
-        # Args:
-        #     parent_id: Parent folder ID
-        # Returns:
-        #     Boolean indicating if folder exists
+        # 检查父文件夹是否存在
+        # 参数：
+        # parent_id：父文件夹 ID
+        # 返回：
+        # 布尔值，指示文件夹是否存在
         parent_files = cls.model.select().where(cls.model.id == parent_id)
         if parent_files.count():
             return True
@@ -268,11 +269,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_root_folder(cls, tenant_id):
-        # Get or create root folder for tenant
-        # Args:
-        #     tenant_id: Tenant ID
-        # Returns:
-        #     Root folder dictionary
+        # 获取或创建租户根文件夹
+        # 参数：
+        # tenant_id：租户 ID
+        # 返回：
+        # 根文件夹字典
         for file in cls.model.select().where((cls.model.tenant_id == tenant_id), (cls.model.parent_id == cls.model.id)):
             return file.to_dict()
 
@@ -293,11 +294,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_kb_folder(cls, tenant_id):
-        # Get dataset folder for tenant
-        # Args:
-        #     tenant_id: Tenant ID
-        # Returns:
-        #     Knowledge base folder dictionary
+        # 获取租户的数据集文件夹
+        # 参数：
+        # tenant_id：租户 ID
+        # 返回：
+        # 知识库文件夹字典
         root_folder = cls.get_root_folder(tenant_id)
         root_id = root_folder["id"]
         kb_folder = cls.model.select().where((cls.model.tenant_id == tenant_id), (cls.model.parent_id == root_id), (cls.model.name == KNOWLEDGEBASE_FOLDER_NAME)).first()
@@ -309,23 +310,23 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def new_a_file_from_kb(cls, tenant_id, name, parent_id, ty=FileType.FOLDER.value, size=0, location=""):
-        # Create a new file from dataset, or return the existing one.
-        # Includes deduplication to handle race conditions where concurrent
-        # requests may have created duplicate entries.
-        # Args:
-        #     tenant_id: Tenant ID
-        #     name: File name
-        #     parent_id: Parent folder ID
-        #     ty: File type
-        #     size: File size
-        #     location: File location
-        # Returns:
-        #     Created or existing file dictionary
+        # 从数据集中创建一个新文件，或返回现有文件。
+        # 包括重复数据删除以处理并发情况下的竞争条件
+        # 请求可能已创建重复条目。
+        # 参数：
+        # tenant_id：租户 ID
+        # 名称： File 名称
+        # parent_id：父文件夹 ID
+        # 型：File型
+        # 尺寸： File 尺寸
+        # 位置： File 位置
+        # 返回：
+        # 创建或现有文件字典
         existing = list(cls.model.select().where((cls.model.tenant_id == tenant_id) & (cls.model.parent_id == parent_id) & (cls.model.name == name)).order_by(cls.model.create_time.asc()))
         if existing:
             if len(existing) > 1:
                 logger.warning(
-                    "Found %d duplicate entries named '%s' under parent %s, keeping only the first",
+                    "发现 %d 个名为“%s”的重复条目，父目录为 %s，仅保留第一个",
                     len(existing),
                     name,
                     parent_id,
@@ -353,17 +354,17 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def init_skills_folder(cls, root_id, tenant_id):
-        # Initialize skills folder if not exists.
-        # Deduplicates duplicate entries that may have been created
-        # by concurrent race conditions (TOCTOU).
-        # Args:
-        #     root_id: Root folder ID
-        #     tenant_id: Tenant ID
+        # 如果技能文件夹不存在则初始化。
+        # 删除可能已创建的重复条目
+        # 通过并发竞争条件 (TOCTOU)。
+        # 参数：
+        # root_id：根文件夹 ID
+        # tenant_id：租户 ID
         existing = list(cls.model.select().where((cls.model.name == SKILLS_FOLDER_NAME) & (cls.model.parent_id == root_id) & (cls.model.tenant_id == tenant_id)).order_by(cls.model.create_time.asc()))
         if existing:
             if len(existing) > 1:
                 logger.warning(
-                    "Found %d duplicate '%s' folders under root %s, keeping only the first",
+                    "发现 %d 个重复的“%s”文件夹，根目录为 %s，仅保留第一个",
                     len(existing),
                     SKILLS_FOLDER_NAME,
                     root_id,
@@ -390,19 +391,19 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def init_knowledgebase_docs(cls, root_id, tenant_id):
-        # Initialize dataset documents.
-        # Deduplicates duplicate entries that may have been created
-        # by concurrent race conditions (TOCTOU).
-        # Args:
-        #     root_id: Root folder ID
-        #     tenant_id: Tenant ID
+        # 初始化数据集文档。
+        # 删除可能已创建的重复条目
+        # 通过并发竞争条件 (TOCTOU)。
+        # 参数：
+        # root_id：根文件夹 ID
+        # tenant_id：租户 ID
         existing = list(
             cls.model.select().where((cls.model.name == KNOWLEDGEBASE_FOLDER_NAME) & (cls.model.parent_id == root_id) & (cls.model.tenant_id == tenant_id)).order_by(cls.model.create_time.asc())
         )
         if existing:
             if len(existing) > 1:
                 logger.warning(
-                    "Found %d duplicate '%s' folders under root %s, keeping only the first",
+                    "发现 %d 个重复的“%s”文件夹，根目录为 %s，仅保留第一个",
                     len(existing),
                     KNOWLEDGEBASE_FOLDER_NAME,
                     root_id,
@@ -423,11 +424,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_parent_folder(cls, file_id):
-        # Get parent folder of a file
-        # Args:
-        #     file_id: File ID
-        # Returns:
-        #     Parent folder object
+        # 获取文件的父文件夹
+        # 参数：
+        # file_id：File ID
+        # 返回：
+        # 父文件夹对象
         file = cls.model.select().where(cls.model.id == file_id)
         if file.count():
             e, file = cls.get_by_id(file[0].parent_id)
@@ -440,11 +441,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_all_parent_folders(cls, start_id):
-        # Get all parent folders in path
-        # Args:
-        #     start_id: Starting file ID
-        # Returns:
-        #     List of parent folder objects
+        # 获取路径中的所有父文件夹
+        # 参数：
+        # start_id：启动文件ID
+        # 返回：
+        # 父文件夹对象列表
         parent_folders = []
         current_id = start_id
         while current_id:
@@ -460,11 +461,11 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def insert(cls, file):
-        # Insert a new file record
-        # Args:
-        #     file: File data dictionary
-        # Returns:
-        #     Created file object
+        # 插入新文件记录
+        # 参数：
+        # 文件：File 数据字典
+        # 返回：
+        # 创建文件对象
         if not cls.save(**file):
             raise RuntimeError("Database error (File)!")
         return File(**file)
@@ -488,7 +489,7 @@ class FileService(CommonService):
                 cls.delete_folder_by_pf_id(user_id, file.id)
             return (cls.model.delete().where((cls.model.tenant_id == user_id) & (cls.model.id == folder_id)).execute(),)
         except Exception:
-            logger.exception("delete_folder_by_pf_id")
+            logger.exception("按父目录ID删除文件夹失败")
             raise RuntimeError("Database error (File retrieval)!")
 
     @classmethod
@@ -539,30 +540,29 @@ class FileService(CommonService):
         try:
             cls.filter_update((cls.model.id << file_ids,), {"parent_id": folder_id})
         except Exception:
-            logger.exception("move_file")
+            logger.exception("移动文件失败")
             raise RuntimeError("Database error (File move)!")
 
     @classmethod
     def _discard_orphaned_document(cls, doc) -> bool:
-        """Drop a document stranded by a deleted knowledge base, and its debris.
+        """删除因已删除的知识库及其碎片而搁浅的文档。
 
-        Connector syncs derive document ids from the external document, so a row
-        stranded this way keeps answering ``get_by_id`` and blocks that document
+        连接器同步从外部文档派生文档 ID，因此一行
+        以这种方式搁浅，不断回答“`get_by_id`` and blocks that document
         from ever being ingested again -- while being invisible to the user,
         because the knowledge base it names is gone. Returns whether it was
         removed.
 
-        Mirrors the teardown ``delete_docs`` performs, minus the chunk work:
-        the chunks went with the index dropped at dataset deletion, and the
-        document's tenant is no longer resolvable through its knowledge base,
-        so there is no index left to address. Storage and row cleanup are
-        best-effort -- the point is to unblock ingestion, so debris that cannot
-        be reached must not resurrect the collision.
-        """
+        Mirrors the teardown ``delete_docs`”执行，减去块工作：
+        这些块随着数据集删除时删除的索引而去，并且
+        文档的租户不再可以通过其知识库进行解析，
+        所以没有剩下的索引需要寻址。存储和行清理是
+        尽力而为——重点是畅通摄入，因此碎片无法
+        达到一定程度后，不得再次发生碰撞。"""
         if KnowledgebaseService.get_or_none(id=doc.kb_id) is not None:
             return False
 
-        logger.warning("Discarding orphaned document %s: its kb_id=%s no longer exists.", doc.id, doc.kb_id)
+        logger.warning("丢弃孤立文档 %s：其 知识库ID=%s 不再存在。", doc.id, doc.kb_id)
         try:
             bucket, location = File2DocumentService.get_storage_address(doc_id=doc.id)
             TaskService.filter_delete([Task.doc_id == doc.id])
@@ -574,7 +574,7 @@ class FileService(CommonService):
             if deleted_file_count > 0:
                 settings.STORAGE_IMPL.rm(bucket, location)
         except Exception:
-            logger.exception("Failed to fully clean up orphaned document %s; removing the row anyway", doc.id)
+            logger.exception("无法完全清理孤立文档 %s；无论如何删除该行", doc.id)
 
         DocumentService.delete_by_id(doc.id)
         return True
@@ -597,7 +597,7 @@ class FileService(CommonService):
         File2Document 负责把文件管理模块中的 file_id 映射到 document_id。
         解析任务由后续 ``POST /documents/ingest`` 创建，而不是由本方法创建。
 
-        Args:
+        参数：
             kb: Knowledgebase ORM 对象；``kb.id`` 同时是原文件/缩略图的对象存储 bucket。
             file_objs: Quart ``FileStorage`` 列表；每项提供 filename/read()，可选携带稳定 id。
             user_id: 当前上传用户/租户，用于文件树和 Document.created_by。
@@ -613,7 +613,7 @@ class FileService(CommonService):
 
         safe_parent_path = sanitize_path(parent_path)
 
-        # Merge parser_config_override with KB parser_config if provided
+        # 将 parser_config_override 与 KB parser_config 合并（如果提供）
         base_parser_config = kb.parser_config or {}
         if parser_config_override and isinstance(parser_config_override, dict):
             merged_parser_config = {**base_parser_config, **parser_config_override}
@@ -629,7 +629,7 @@ class FileService(CommonService):
             if e and str(doc.kb_id) != str(kb.id):
                 if not self._discard_orphaned_document(doc):
                     logger.warning(
-                        "Existing document id collision detected for %s: belongs to kb_id=%s, incoming kb_id=%s. Skipping update to avoid cross-KB overwrite.",
+                        "检测到 %s 的现有文档 ID 冲突：属于 知识库ID=%s，传入 知识库ID=%s。跳过更新以避免交叉 KB 覆盖。",
                         doc_id,
                         doc.kb_id,
                         kb.id,
@@ -637,15 +637,15 @@ class FileService(CommonService):
                     user_msg = f"Existing document id collision with knowledge base '{doc.kb_id}'; skipping update."
                     err.append(file.filename + ": " + user_msg)
                     continue
-                # The stranded row is gone; ingest as a fresh document.
+                # 滞留排没了；作为新文档摄取。
                 e, doc = False, None
             if e:
                 try:
                     blob = file.read()
-                    # Connector-supplied fingerprint (e.g. xxhash128(S3 ETag))
-                    # takes precedence: for connector-sourced docs the bypass
-                    # path uses the fingerprint as content_hash, so reverting
-                    # to xxhash128(blob) here would defeat it.
+                    # 连接器提供的指纹 (e.g.xxhash128(S3 ETag))
+                    # 优先：对于连接器来源的文档，绕过
+                    # 路径使用指纹为 content_hash，因此恢复
+                    # 到 xxhash128(blob) 这里会击败它。
                     incoming_fp = getattr(file, "fingerprint", None)
                     new_hash = incoming_fp or xxhash.xxh128(blob).hexdigest()
                     old_hash = doc.content_hash or ""
@@ -661,12 +661,12 @@ class FileService(CommonService):
                     if new_hash != old_hash:
                         files.append((doc, blob))
                 except Exception as exc:
-                    logger.exception("Failed to update document %s", doc_id)
+                    logger.exception("更新文档失败 %s", doc_id)
                     err.append(file.filename + ": " + str(exc))
                 continue
             try:
                 DocumentService.check_doc_health(kb.tenant_id, file.filename)
-                filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id) # 处理重复名称, 如果同一知识库中已经存在相同文件名，系统会生成一个不冲突的新名称
+                filename = duplicate_name(DocumentService.query, name=file.filename, kb_id=kb.id)  # 处理重复名称, 如果同一知识库中已经存在相同文件名，系统会生成一个不冲突的新名称
                 # 判断文件类型
                 filetype = filename_type(filename)
                 if filetype == FileType.OTHER.value:
@@ -714,7 +714,7 @@ class FileService(CommonService):
                     "size": len(blob),
                     "thumbnail": thumbnail_location,
                     # 用于判断文件内容是否发生变化
-                    "content_hash": incoming_fp or xxhash.xxh128(blob).hexdigest()
+                    "content_hash": incoming_fp or xxhash.xxh128(blob).hexdigest(),
                 }
 
                 # 先写 Document 元数据，再建立文件管理记录和 File2Document 关系。
@@ -723,7 +723,7 @@ class FileService(CommonService):
                 DocumentService.insert(doc)
                 FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
                 logger.info(
-                    "document_storage_created doc_id=%s kb_id=%s location=%s type=%s size=%d thumbnail=%s",
+                    "文档存储记录已创建 文档ID=%s 知识库ID=%s 存储位置=%s 文件类型=%s 文件大小=%d 是否有缩略图=%s",
                     doc_id,
                     kb.id,
                     location,
@@ -744,7 +744,7 @@ class FileService(CommonService):
             files = cls.model.select().where((cls.model.parent_id == parent_id) & (cls.model.id != parent_id))
             return list(files)
         except Exception:
-            logger.exception("list_by_parent_id failed")
+            logger.exception("list_by_parent_id 失败")
             raise RuntimeError("Database error (list_by_parent_id)!")
 
     @staticmethod
@@ -848,16 +848,15 @@ class FileService(CommonService):
 
     @staticmethod
     def _validate_url_for_crawl(url: str) -> tuple[str, str]:
-        """Raise ValueError if the URL is not safe to crawl (SSRF guard).
+        """如果 URL 无法安全爬行（SSRF 防护装置），请升起 ValueError。
 
-        Delegates to :func:`common.ssrf_guard.assert_url_is_safe`, which
-        validates the scheme, hostname, and every DNS-resolved address, and
-        returns ``(hostname, resolved_ip)`` for DNS pinning.
+        委托给 :func:`common.ssrf_guard.assert_url_is_safe`，其中
+        验证方案、主机名和每个 DNS 解析的地址，以及
+        返回 DNS 固定的“`(hostname, resolved_ip)`”。
 
-        Only the scheme and host (and port when present) are forwarded to the
-        guard so that credentials or query parameters in *url* are never
-        written to the log.
-        """
+        仅方案和主机（以及端口（如果存在））被转发到
+        保护，以便 *url* 中的凭据或查询参数永远不会
+        写入日志。"""
         from urllib.parse import urlparse
 
         parsed = urlparse(url)
@@ -896,15 +895,15 @@ class FileService(CommonService):
             _MAX_CRAWL_REDIRECTS = 10
 
             with browser_fetch_slot():
-                # Pre-resolve the full redirect chain so that AsyncWebCrawler never
-                # follows a server-sent redirect to an unvalidated (potentially
-                # internal) host. Each hop is SSRF-checked before being followed;
-                # the validated (hostname, ip) pairs are pinned via Chromium's
-                # --host-resolver-rules so the browser cannot re-resolve any of them
-                # through a fresh DNS query.
+                # 预解析完整重定向链，以便 AsyncWebCrawler 永远不会
+                # 遵循服务器发送的重定向到未经验证的（可能
+                # 内部）主机。每个跃点在被跟踪之前都会经过 SSRF 检查；
+                # 已验证的（主机名、ip）对通过 Chromium 固定
+                # --host-resolver-rules 因此浏览器无法重新解析其中任何一个
+                # 通过新鲜的DNS 查询。
                 current_url = url
                 current_hostname, current_ip = FileService._validate_url_for_crawl(current_url)
-                # Accumulate MAP rules for every hostname we encounter in the chain.
+                # 为我们在链中遇到的每个主机名累积 MAP 规则。
                 host_pins: dict[str, str] = {current_hostname: current_ip}
 
                 for _ in range(_MAX_CRAWL_REDIRECTS):
@@ -931,9 +930,10 @@ class FileService(CommonService):
                 else:
                     raise ValueError(f"Exceeded {_MAX_CRAWL_REDIRECTS} redirects fetching {url!r}")
 
-                # Build a single MAP rule string covering every validated hostname
-                # in the redirect chain. Chromium uses the pinned IP for each,
-                # skipping DNS entirely and eliminating the rebinding window.
+                # 构建覆盖每个经过验证的主机名的单个 MAP 规则字符串
+                # 重定向链中的
+                # 。 Chromium 对每个都使用固定的 IP，
+                # 完全跳过 DNS 并消除重新绑定窗口。
                 _map_rules = ",".join(f"MAP {h} {ip}" for h, ip in host_pins.items())
 
                 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CrawlResult, DefaultMarkdownGenerator, PruningContentFilter
@@ -948,8 +948,8 @@ class FileService(CommonService):
                     )
                     async with AsyncWebCrawler(config=browser_config) as crawler:
                         crawler_config = CrawlerRunConfig(markdown_generator=DefaultMarkdownGenerator(content_filter=PruningContentFilter()), pdf=True, screenshot=False)
-                        # Use the final resolved URL so the browser starts at the
-                        # redirect destination rather than re-following the chain.
+                        # 使用最终解析的 URL，以便浏览器从
+                        # 重定向目的地而不是重新跟踪链。
                         result: CrawlResult = await asyncio.wait_for(crawler.arun(url=current_url, config=crawler_config), timeout=BROWSER_FETCH_TIMEOUT)
                         return result
 

@@ -33,8 +33,8 @@ MAX_RESULT_WINDOW = 10000
 SEARCH_AFTER_BATCH_SIZE = 1000
 KNN_QUERY_STRING_FILTER_WEIGHT_THRESHOLD = 0.8
 
-# Single-document atomic pagerank_fea adjust (chunk feedback). Clamps using params.min_w / max_w;
-# removes field at zero for rank_feature compatibility.
+# 单文档原子 pagerank_fea 调整（块反馈）。夹具采用params.min_w / max_w；
+# 删除零处的字段以实现 rank_feature 兼容性。
 _PAGERANK_FEA_ADJUST_SCRIPT = """
 double cur = 0.0;
 if (ctx._source.containsKey(params.pf)) {
@@ -99,9 +99,7 @@ def _build_knn_filter_query(bool_query, vector_similarity_weight: float):
 
 @singleton
 class ESConnection(ESConnectionBase):
-    """
-    CRUD operations
-    """
+    """CRUD操作"""
 
     def refresh_idx(self, index_name: str) -> bool:
         self.es.indices.refresh(index=index_name)
@@ -274,7 +272,7 @@ class ESConnection(ESConnectionBase):
                     k,
                     num_candidates,
                     query_vector=list(m.embedding_data),
-                    filter=bool_query.to_dict(),  # filter=_build_knn_filter_query(bool_query, vector_similarity_weight),
+                    filter=bool_query.to_dict(),  # 过滤器=_build_knn_filter_query（bool_query，vector_similarity_weight），
                     similarity=similarity,
                 )
 
@@ -299,7 +297,7 @@ class ESConnection(ESConnectionBase):
                 elif field.endswith("_int") or field.endswith("_flt"):
                     order_info = {"order": order, "unmapped_type": "float"}
                 elif field == "id":
-                    continue  # id as "text", not a "keyword", order by it will cause error
+                    continue  # id为“文本”，而不是“关键字”，按它排序会导致错误
                 else:
                     order_info = {"order": order, "unmapped_type": "keyword"}
                 orders.append({field: order_info})
@@ -314,15 +312,15 @@ class ESConnection(ESConnectionBase):
 
         if limit > 0 and not use_search_after:
             s = s[offset : offset + limit]
-        # Filter _source to only requested fields for efficiency, and add vector
-        # fields to "fields" param so they appear in hit.fields when ES 9.x
-        # exclude_source_vectors is enabled (dense_vector not in _source).
+        # 将 _source 过滤到仅请求的字段以提高效率，并添加向量
+        # 字段到“字段”参数，以便当 ES 9.x 时它们出现在 hit.fields 中
+        # exclude_source_vectors 已启用（dense_vector 不在 _source 中）。
         if select_fields:
             s = s.source(select_fields)
         q = s.to_dict()
-        # ES 9.x: dense_vector fields excluded from _source; request them via fields.
-        # Note: knn does NOT have a "fields" parameter - adding it inside the knn
-        # object causes BadRequestError on ES 9.x. We add "fields" at top level.
+        # ES 9.x：dense_vector 字段从 _source 中排除；通过字段请求它们。
+        # 注意：knn 是否 NOT 有一个“fields”参数 - 将其添加到 knn 中
+        # 对象在 ES 9.x 上导致 BadRequestError。我们在顶层添加“字段”。
         vector_fields = [f for f in (select_fields or []) if f.endswith("_vec")]
         if vector_fields:
             q["fields"] = vector_fields
@@ -333,18 +331,18 @@ class ESConnection(ESConnectionBase):
                 if use_search_after:
                     res = self._search_with_search_after(index_names, q, offset, limit)
                 else:
-                    # print(json.dumps(q, ensure_ascii=False))
+                    # 打印(json.dumps(q, ensure_ascii=False))
                     res = self._es_search_once(index_names, q, track_total_hits=True)
                 if str(res.get("timed_out", "")).lower() == "true":
                     raise Exception("Es Timeout.")
                 self.logger.debug(f"ESConnection.search {index_names!s} res: " + str(res))
                 return res
             except ConnectionTimeout:
-                self.logger.exception("ES request timeout")
+                self.logger.exception("ES 请求超时")
                 self._connect()
                 continue
             except Exception as e:
-                # Only log debug for NotFoundError(accepted when metadata index doesn't exist)
+                # 仅记录 NotFoundError 的调试（当元数据索引不存在时接受）
                 if "NotFound" in str(e):
                     self.logger.debug(f"ESConnection.search {index_names!s} query: " + str(q) + " - " + str(e))
                 else:
@@ -365,7 +363,7 @@ class ESConnection(ESConnectionBase):
             assert "id" in d
             d_copy = copy.deepcopy(d)
             d_copy["kb_id"] = knowledgebase_id
-            # Use id as _id for uniqueness, also keep "id" as a regular field for sorting
+            # 使用 id 作为 _id 来保证唯一性，同时保留“id”作为常规字段进行排序
             meta_id = d_copy.get("id", "")
             operations.append({"index": {"_index": index_name, "_id": meta_id}})
             operations.append(d_copy)
@@ -373,7 +371,7 @@ class ESConnection(ESConnectionBase):
         # 最多尝试 ATTEMPT_TIME 次。HTTP 成功且 response.errors=False 时返回 []；
         # 非空列表表示存在连接异常或某个 Bulk item 写入失败。
         res = []
-        for _ in range(ATTEMPT_TIME): # 如果有异常会重试一次
+        for _ in range(ATTEMPT_TIME):  # 如果有异常会重试一次
             try:
                 res = []
                 # 批量写入ES
@@ -387,7 +385,7 @@ class ESConnection(ESConnectionBase):
                             res.append(str(item[action]["_id"]) + ":" + str(item[action]["error"]))
                 return res
             except ConnectionTimeout:
-                self.logger.exception("ES request timeout")
+                self.logger.exception("ES 请求超时")
                 time.sleep(3)
                 self._connect()
                 continue
@@ -402,7 +400,7 @@ class ESConnection(ESConnectionBase):
         doc.pop("id", None)
         condition["kb_id"] = knowledgebase_id
         if "id" in condition and isinstance(condition["id"], str):
-            # update specific single document
+            # 更新具体单文件
             chunk_id = condition["id"]
             for i in range(ATTEMPT_TIME):
                 doc_part = copy.deepcopy(doc)
@@ -446,7 +444,7 @@ class ESConnection(ESConnectionBase):
                     break
             return False
 
-        # update unspecific maybe-multiple documents
+        # 更新非特定的可能多个文档
         bool_query = Q("bool")
         for k, v in condition.items():
             if not isinstance(k, str) or not v:
@@ -507,7 +505,7 @@ class ESConnection(ESConnectionBase):
                 _ = ubq.execute()
                 return True
             except ConnectionTimeout:
-                self.logger.exception("ES request timeout")
+                self.logger.exception("ES 请求超时")
                 time.sleep(3)
                 self._connect()
                 continue
@@ -526,7 +524,7 @@ class ESConnection(ESConnectionBase):
         max_w: float = 100.0,
         row_id: int | None = None,
     ) -> bool:
-        """Atomically adjust pagerank_fea on one chunk (painless script)."""
+        """在一个块上自动调整 pagerank_fea（无痛脚本）。"""
         _ = row_id
         for _ in range(ATTEMPT_TIME):
             try:
@@ -546,20 +544,20 @@ class ESConnection(ESConnectionBase):
                     },
                 )
                 self.logger.debug(
-                    "ESConnection.adjust_chunk_pagerank_fea(index=%s, id=%s, delta=%s) succeeded",
+                    "ESConnection.adjust_chunk_pagerank_fea(index=%s, id=%s, delta=%s) 成功",
                     index_name,
                     chunk_id,
                     delta,
                 )
                 return True
             except ConnectionTimeout:
-                self.logger.exception("ES request timeout")
+                self.logger.exception("ES 请求超时")
                 time.sleep(3)
                 self._connect()
                 continue
             except Exception as e:
                 self.logger.exception(
-                    "ESConnection.adjust_chunk_pagerank_fea(index=%s, id=%s): %s",
+                    "ESConnection.adjust_chunk_pagerank_fea（索引=%s，id=%s）：%s",
                     index_name,
                     chunk_id,
                     e,
@@ -575,23 +573,23 @@ class ESConnection(ESConnectionBase):
         assert "_id" not in condition
         condition["kb_id"] = knowledgebase_id
 
-        # Build a bool query that combines id filter with other conditions
+        # 构建一个将 id 过滤器与其他条件相结合的 bool 查询
         bool_query = Q("bool")
 
-        # Handle chunk IDs if present
+        # 处理块 IDs（如果存在）
         if "id" in condition:
             chunk_ids = condition["id"]
             if not isinstance(chunk_ids, list):
                 chunk_ids = [chunk_ids]
             if chunk_ids:
-                # Filter by specific chunk IDs
+                # 按特定块过滤 IDs
                 bool_query.filter.append(Q("ids", values=chunk_ids))
-            # If chunk_ids is empty, we don't add an ids filter - rely on other conditions
+            # 如果 chunk_ids 为空，我们不会添加 ids 过滤器 - 依赖于其他条件
 
-        # Add all other conditions as filters
+        # 添加所有其他条件作为过滤器
         for k, v in condition.items():
             if k == "id":
-                continue  # Already handled above
+                continue  # 上面已经处理了
             if k == "exists":
                 bool_query.filter.append(Q("exists", field=v))
             elif k == "must_not":
@@ -606,7 +604,7 @@ class ESConnection(ESConnectionBase):
             elif v is not None:
                 raise Exception("Condition value must be int, str or list.")
 
-        # If no filters were added, use match_all (for tenant-wide operations)
+        # 如果未添加过滤器，则使用 match_all（用于租户范围的操作）
         if not bool_query.filter and not bool_query.must and not bool_query.must_not:
             qry = Q("match_all")
         else:
@@ -617,7 +615,7 @@ class ESConnection(ESConnectionBase):
                 res = self.es.delete_by_query(index=index_name, body=Search().query(qry).to_dict(), refresh=True)
                 return res["deleted"]
             except ConnectionTimeout:
-                self.logger.exception("ES request timeout")
+                self.logger.exception("ES 请求超时")
                 time.sleep(3)
                 self._connect()
                 continue
@@ -627,9 +625,7 @@ class ESConnection(ESConnectionBase):
                     return 0
         return 0
 
-    """
-    Helper functions for search result
-    """
+    """搜索结果的辅助函数"""
 
     def get_fields(self, res, fields: list[str]) -> dict[str, dict]:
         res_fields = {}
@@ -639,17 +635,17 @@ class ESConnection(ESConnectionBase):
         for hit in hits:
             doc_id = hit.get("_id")
             d = hit.get("_source", {})
-            # Also extract fields from ES "fields" response (used by dense_vector in ES 9.x)
+            # 还从 ES“字段”响应中提取字段（由 dense_vector 在 ES 9.x 中使用）
             hit_fields = hit.get("fields", {})
             m = {}
             for n in fields:
-                # First check _source
+                # 首先查看_source
                 if d.get(n) is not None:
                     m[n] = d.get(n)
-                # Then check fields (ES 9.x stores dense_vector here, not in _source)
+                # 然后检查字段（ES 9.x在这里存储dense_vector，而不是在_source中）
                 elif n in hit_fields:
                     vals = hit_fields[n]
-                    # ES fields response wraps dense_vector in 2 levels: [[v1,v2,...]] -> [v1,v2,...]
+                    # ES 字段响应将 dense_vector 分为 2 个级别： [[v1,v2,...]] -> [v1,v2,...]
                     if isinstance(vals, list) and len(vals) == 1:
                         vals = vals[0]
                     m[n] = vals
@@ -662,7 +658,7 @@ class ESConnection(ESConnectionBase):
                     continue
                 if not isinstance(v, str):
                     m[n] = str(m[n])
-                # if n.find("tks") > 0:
+                # 如果 n.find("tks") > 0:
                 #     m[n] = remove_redundant_spaces(m[n])
 
             if m:

@@ -13,14 +13,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Chunk Builder Module.
+"""Chunk 构建器模块。
 
-Provides parser factory and document chunking logic:
-- Parser module registration and selection
-- Document chunking via parser
-- PDF outline extraction
-"""
+提供解析器工厂和文档分块逻辑：
+- 解析器模块注册和选择
+- Document 通过解析器分块
+- PDF轮廓提取"""
 
 import logging
 from timeit import default_timer as timer
@@ -37,14 +35,13 @@ from rag.utils.table_es_metadata import merge_table_parser_config_from_kb
 
 
 def get_parser(parser_id: str):
-    """Get parser module by ID.
+    """通过ID获取解析器模块。
 
-    Args:
-        parser_id: The parser identifier.
+    参数：
+        parser_id：解析器标识符。
 
-    Returns:
-        The parser module for the given parser ID.
-    """
+    返回：
+        给定解析器 ID 的解析器模块。"""
     from rag.app import laws, paper, presentation, manual, qa, table, book, resume, picture, naive, one, audio, email, tag
 
     # parser_id 决定“如何把原文件变成结构化 Chunk”，不是文件后缀的简单映射；
@@ -76,20 +73,19 @@ async def run_chunking(
     ctx: TaskContext,
     on_chunking_start=None,
 ) -> List[Dict]:
-    """Run document chunking via parser.
+    """通过解析器运行文档分块。
 
-    Args:
-        chunker: The parser module to use.
-        binary: Binary content of the document.
-        ctx: TaskContext containing task configuration.
+    参数：
+        chunker：要使用的解析器模块。
+        二进制：文档的二进制内容。
+        ctx: TaskContext 包含任务配置。
 
-    Returns:
-        List of chunk dictionaries.
-    """
+    返回：
+        块字典列表。"""
     st = timer()
     try:
         # 表格解析允许知识库级字段角色配置覆盖文档配置；普通文档通常保持原 parser_config。
-        # Merge table parser config
+        # 合并表解析器配置
         parser_config = merge_table_parser_config_from_kb(ctx.raw_task)
 
         chunking_wait_started_at = timer()
@@ -123,12 +119,11 @@ async def run_chunking(
 
 
 async def extract_outline(cks: List[Dict], ctx: TaskContext) -> None:
-    """Extract and persist PDF outline if present.
+    """提取并保留 PDF 大纲（如果存在）。
 
-    Args:
-        cks: List of chunk dictionaries.
-        ctx: TaskContext containing task configuration.
-    """
+    参数：
+        cks：块字典列表。
+        ctx: TaskContext 包含任务配置。"""
     outline_data = cks[0].get("__outline__") if cks else None
     ctx.recording_context.record("outline_data", outline_data)
 
@@ -141,6 +136,6 @@ async def extract_outline(cks: List[Dict], ctx: TaskContext) -> None:
                 temp_doc = DocMetadataService.get_document_metadata(ctx.doc_id) or {}
                 DocMetadataService.update_document_metadata(ctx.doc_id, update_metadata_to({"outline": outline}, temp_doc))
 
-            logging.info("Persisted PDF outline (%d entries) for doc %s", len(outline), ctx.doc_id)
+            logging.info("PDF大纲已持久化 条目数=%d 文档ID=%s", len(outline), ctx.doc_id)
         except Exception as e:
-            logging.warning("Failed to persist PDF outline for doc %s: %s", ctx.doc_id, e)
+            logging.warning("无法保留文档 %s 的 PDF 大纲：%s", ctx.doc_id, e)

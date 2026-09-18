@@ -189,30 +189,28 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_filter_by_kb_id(cls, kb_id, keywords, run_status, types, suffix):
-        """
-        returns:
+        """返回：
         {
-            "suffix": {
+            "suffix"：{
                 "ppt": 1,
-                "doxc": 2
+                "doxc"：2
             },
-            "run_status": {
+            "run_status"：{
              "1": 2,
-             "2": 2
+             "2"：2
             }
-            "metadata": {
-                "key1": {
+            "metadata"：{
+                "key1"：{
                  "key1_value1": 1,
                  "key1_value2": 2,
                 },
-                "key2": {
-                 "key2_value1": 2,
+                "key2"：{
+                 "key2_value1"：2，
                  "key2_value2": 1,
                 },
             }
-        }, total
-        where "1" => RUNNING, "2" => CANCEL
-        """
+        }，总计
+        其中 "1" => RUNNING，"2" => CANCEL"""
         fields = cls.get_cls_model_fields()
         if keywords:
             query = (
@@ -280,18 +278,17 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_parsing_status_by_kb_ids(cls, kb_ids: list[str]) -> dict[str, dict[str, int]]:
-        """Return aggregated document parsing status counts grouped by dataset (kb_id).
+        """返回按数据集分组的聚合文档解析状态计数 (kb_id)。
 
-        For each kb_id, counts documents in each run-status bucket:
-            - unstart_count  (run == "0")
-            - running_count   (run == "1")
-            - cancel_count    (run == "2")
-            - done_count      (run == "3")
-            - fail_count      (run == "4")
+        对于每个 kb_id，计算每个运行状态存储桶中的文档：
+            - unstart_count（运行== "0"）
+            - running_count（运行== "1"）
+            - cancel_count（运行== "2"）
+            - done_count（运行== "3"）
+            - fail_count（运行== "4"）
 
-        Returns a dict keyed by kb_id, e.g.
-            {"kb-abc": {"unstart_count": 10, "running_count": 2, ...}, ...}
-        """
+        返回一个由 kb_id、e.g 键控的字典。
+            {"kb-abc"：{"unstart_count": 10, "running_count": 2, ...}，...}"""
         if not kb_ids:
             return {}
 
@@ -363,7 +360,7 @@ class DocumentService(CommonService):
         fields = [cls.model.id, cls.model.kb_id]
         docs = cls.model.select(*fields).where(cls.model.kb_id.in_(kb_ids))
         docs = docs.order_by(cls.model.create_time.asc())
-        # maybe cause slow query by deep paginate, optimize later
+        # 可能会因为深度分页导致查询慢，稍后优化
         offset, limit = 0, 100
         res = []
         while True:
@@ -401,16 +398,15 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def list_id_content_hash_map_by_kb_and_source_type(cls, kb_id, source_type, page_size=500):
-        """Return {doc_id: content_hash} for the connector's existing docs.
+        """返回 {doc_id: content_hash} 连接器的现有文档。
 
-        Used by the fingerprint-bypass path to decide which keys can skip a
-        re-fetch -- if the connector's listing fingerprint equals content_hash,
-        the body hasn't changed since the last sync.
+        由指纹绕过路径用来决定哪些键可以跳过
+        重新获取 - 如果连接器的列表指纹等于 content_hash，
+        自上次同步以来，主体没有改变。
 
-        Ordered by create_time so LIMIT/OFFSET pagination is stable under
-        concurrent writes; without this, page boundaries can drop or duplicate
-        rows and the resulting map would silently miss entries.
-        """
+        按 create_time 排序，因此 LIMIT/OFFSET 分页在以下情况下稳定
+        并发写入；如果没有这个，页面边界可能会丢失或重复
+        行和生成的映射将默默地错过条目。"""
         fields = [cls.model.id, cls.model.content_hash]
         docs = (
             cls.model.select(*fields)
@@ -437,7 +433,7 @@ class DocumentService(CommonService):
         fields = [cls.model.id, cls.model.kb_id, cls.model.token_num, cls.model.chunk_num, Knowledgebase.tenant_id]
         docs = cls.model.select(*fields).join(Knowledgebase, on=(Knowledgebase.id == cls.model.kb_id)).where(cls.model.created_by == creator_id)
         docs = docs.order_by(cls.model.create_time.asc())
-        # maybe cause slow query by deep paginate, optimize later
+        # 可能会因深度分页导致查询慢，稍后优化
         offset, limit = 0, 100
         res = []
         while True:
@@ -469,27 +465,27 @@ class DocumentService(CommonService):
         chunk_index_name = search.index_name(tenant_id)
         chunk_index_exists = settings.docStoreConn.index_exist(chunk_index_name, doc.kb_id)
 
-        # Cancel all running tasks first using preset function in task_service.py --- set cancel flag in Redis
+        # 首先使用 task_service.py 中预设的功能取消所有正在运行的任务 --- 在 Redis 中设置取消标志
         try:
             cancel_all_task_of(doc.id)
             logging.info(f"Cancelled all tasks for document {doc.id}")
         except Exception as e:
             logging.warning(f"Failed to cancel tasks for document {doc.id}: {e}")
 
-        # Delete tasks from database
+        # 从数据库中删除任务
         try:
             TaskService.filter_delete([Task.doc_id == doc.id])
         except Exception as e:
             logging.warning(f"Failed to delete tasks for document {doc.id}: {e}")
 
-        # Delete chunk images (non-critical, log and continue)
+        # 删除块映像（非关键，记录并继续）
         try:
             if chunk_index_exists:
                 cls.delete_chunk_images(doc, tenant_id)
         except Exception as e:
             logging.warning(f"Failed to delete chunk images for document {doc.id}: {e}")
 
-        # Delete thumbnail (non-critical, log and continue)
+        # 删除缩略图（非关键，记录并继续）
         try:
             if doc.thumbnail and not doc.thumbnail.startswith(IMG_BASE64_PREFIX):
                 if settings.STORAGE_IMPL.obj_exist(doc.kb_id, doc.thumbnail):
@@ -497,9 +493,10 @@ class DocumentService(CommonService):
         except Exception as e:
             logging.warning(f"Failed to delete thumbnail for document {doc.id}: {e}")
 
-        # Prune this doc's line from the KB's tree-kind navigation before the
-        # broad doc_id delete below removes the nav_doc row needed to locate
-        # and update its parent cluster.
+        # 在之前修剪此文档's line from the KB's树类导航
+        # 下面的
+        # 宽 doc_id 删除删除了定位所需的 nav_doc 行
+        # 并更新其父集群。
         try:
             from rag.advanced_rag.knowlege_compile.dataset_nav import (
                 remove_dataset_nav_doc_sync,
@@ -511,15 +508,15 @@ class DocumentService(CommonService):
                 f"Failed to prune dataset_nav for document {doc.id}: {e}",
             )
 
-        # Delete chunks from doc store - this is critical, log errors
+        # 从文档存储中删除块 - 这很关键，记录错误
         try:
             settings.docStoreConn.delete({"doc_id": doc.id}, chunk_index_name, doc.kb_id)
         except Exception as e:
             logging.error(f"Failed to delete chunks from doc store for document {doc.id}: {e}")
 
-        # Record doc deletion for incremental structure-merge ghost cleanup.
-        # Runs after the doc_id sweep so the marker (stored under
-        # deleted_doc_id to avoid matching the same sweep) survives.
+        # 记录增量结构合并幽灵清理的文档删除。
+        # 在 doc_id 扫描之后运行，因此标记（存储在
+        # deleted_doc_id 以避免匹配相同的扫描）幸存。
         try:
             from rag.svr.task_executor_refactor.dataset_structure_merger import (
                 record_doc_deletion,
@@ -531,22 +528,22 @@ class DocumentService(CommonService):
                 f"Failed to record doc deletion for structure merge: {e}",
             )
 
-        # Ref-counted cleanup of wiki/artifact products this doc fed into
-        # (non-critical, log and continue). A product shared by other docs
-        # survives; one this doc solely owned is removed.
+        # 本文档输入的 wiki/artifact 产品的参考计数清理
+        # （非关键，记录并继续）。其他文档共享的产品
+        # 幸存；该文档独自拥有的一项已被删除。
         try:
             if chunk_index_exists:
                 cls.remove_wiki_products(doc, tenant_id)
         except Exception as e:
             logging.warning(f"Failed to clean up artifact products for document {doc.id}: {e}")
 
-        # Delete document metadata (non-critical, log and continue)
+        # 删除文档元数据（非关键，记录并继续）
         try:
             DocMetadataService.delete_document_metadata(doc.id, doc.kb_id, tenant_id)
         except Exception as e:
             logging.warning(f"Failed to delete metadata for document {doc.id}: {e}")
 
-        # Cleanup knowledge graph references (non-critical, log and continue)
+        # 清理知识图参考（非关键，记录并继续）
         try:
             if chunk_index_exists:
                 graph_source = settings.docStoreConn.get_fields(
@@ -588,22 +585,21 @@ class DocumentService(CommonService):
 
     @classmethod
     def remove_wiki_products(cls, doc, tenant_id):
-        """Reference-counted cleanup of KB-scoped wiki/artifact products
-        in the doc store when a document is deleted.
+        """KB 范围的 wiki/artifact 产品的引用计数清理
+        删除文档时在文档存储中。
 
-        Every derived artifact row (pages, entities, relations, drafts,
-        topics, reduce/plan aggregates) carries a ``source_doc_ids`` list
+        每个派生的工件行（页面、实体、关系、草稿、
+        主题，reduce/plan 聚合）携带``source_doc_ids`` list
         of the documents that contributed to it. On delete we detach
         ``doc.id`` from that list and drop the row only when this document
         was its sole contributor — a product shared by other docs
         survives. ``wiki_map_extract`` resume rows are 1:1 with a
-        document and are removed directly by ``doc_id``.
+        document and are removed directly by ``doc_id``。
 
-        The compile_kwd set is pulled from the wiki generator so new
-        artifact row types are covered automatically (single source of
-        truth). Deletion is not a hot path, so the module import cost is
-        acceptable here.
-        """
+        compile_kwd 集是从 wiki 生成器中提取的，所以很新
+        自动覆盖工件行类型（单一来源
+        真相）。删除不是热路径，因此模块导入成本为
+        这里可以接受。"""
         from rag.svr.task_executor_refactor.dataset_wiki_generator import (
             WIKI_MAP_COMPILE_KWD,
             WIKI_DERIVED_COMPILE_KWDS,
@@ -613,19 +609,19 @@ class DocumentService(CommonService):
         if not settings.docStoreConn.index_exist(index, doc.kb_id):
             return
 
-        # 1. Per-doc MAP resume rows are keyed by the real doc_id.
+        # 1. 每个文档 MAP 简历行由真实的 doc_id 键入。
         settings.docStoreConn.delete(
             {"compile_kwd": [WIKI_MAP_COMPILE_KWD], "doc_id": doc.id},
             index,
             doc.kb_id,
         )
 
-        # 2. Derived KB-scoped rows: reference-counted via source_doc_ids.
-        # Read every row this doc contributed to, partitioning into rows it
-        # solely owned (delete by id) vs. rows shared with other docs
-        # (detach this doc). Reading first — rather than a blanket
-        # ``must_not exists`` sweep — avoids deleting rows that legitimately
-        # carry no source_doc_ids.
+        # 2. 派生 KB 范围的行：通过 source_doc_ids 进行引用计数。
+        # 读取该文档贡献的每一行，并将其分区为行
+        # 独资拥有（按 id 删除）与与其他文档共享的行
+        # （分离此文档）。先读书——而不是盖毯子
+        # ``must_not exists`` 扫描 — 避免删除合法的行
+        # 不携带 source_doc_ids。
         derived_kwds = list(WIKI_DERIVED_COMPILE_KWDS)
         select_fields = ["id", "source_doc_ids"]
         sole_owner_ids: list[str] = []
@@ -663,7 +659,7 @@ class DocumentService(CommonService):
                 break
             offset += page_size
 
-        # Drop rows this document solely owned (delete by id in batches).
+        # 删除该文档独占的行（按id批量删除）。
         for i in range(0, len(sole_owner_ids), page_size):
             settings.docStoreConn.delete(
                 {"id": sole_owner_ids[i : i + page_size]},
@@ -671,10 +667,10 @@ class DocumentService(CommonService):
                 doc.kb_id,
             )
 
-        # Detach this document from rows still owned by others. The filter
-        # guarantees source_doc_ids contains doc.id, so the store's
-        # list-remove is safe; any sole-owner rows already deleted above are
-        # simply not matched.
+        # 将此文档与仍由其他人拥有的行分离。过滤器
+        # 保证source_doc_ids包含doc.id，所以商店的
+        # 列表删除是安全的；上面已经删除的任何唯一所有者行都是
+        # 根本不匹配。
         if shared_seen:
             settings.docStoreConn.update(
                 {"compile_kwd": derived_kwds, "source_doc_ids": doc.id},
@@ -683,7 +679,7 @@ class DocumentService(CommonService):
                 doc.kb_id,
             )
 
-        # 3. Clean up doc_page_source tracking rows (new incremental design).
+        # 3. 清理doc_page_source 跟踪行（新的增量设计）。
         try:
             doc_page_kwd = "wiki_doc_page_source"
             res = settings.docStoreConn.search(
@@ -705,7 +701,7 @@ class DocumentService(CommonService):
                 )
         except Exception:
             logging.exception(
-                "DocumentService.remove_wiki_products: doc_page_source cleanup failed for doc %s",
+                "DocumentService.remove_wiki_products：文档 %s 的 doc_page_source 清理失败",
                 doc.id,
             )
 
@@ -758,13 +754,13 @@ class DocumentService(CommonService):
                 | (cls.model.id.in_(unfinished_task_query))
                 | ((cls.model.progress == -1) & (cls.model.run == TaskStatus.FAIL.value) & (cls.model.id.in_(docs_with_non_failed_tasks)))
             ),
-        )  # including GraphRAG/RAPTOR/Mindmap; re-sync failed docs
+        )  # 包括 GraphRAG/RAPTOR/思维导图；重新同步失败的文档
         return list(docs.dicts())
 
     @classmethod
     @DB.connection_context()
     def increment_chunk_num(cls, doc_id, kb_id, token_num, chunk_num, duration):
-        """Atomically add chunk/token counters on the document and its knowledge base."""
+        """在文档及其知识库上自动添加 chunk/token 计数器。"""
         with DB.atomic():
             num = (
                 cls.model.update(
@@ -777,7 +773,7 @@ class DocumentService(CommonService):
             )
             if num == 0:
                 logging.error(
-                    "increment_chunk_num: no document matched doc_id=%s kb_id=%s token_num=%s chunk_num=%s duration=%s",
+                    "increment_chunk_num：没有匹配的文档 文档ID=%s 知识库ID=%s token_num=%s chunk_num=%s 持续时间=%s",
                     doc_id,
                     kb_id,
                     token_num,
@@ -795,7 +791,7 @@ class DocumentService(CommonService):
             )
             if num == 0:
                 logging.error(
-                    "increment_chunk_num: no knowledgebase matched kb_id=%s for doc_id=%s token_num=%s chunk_num=%s duration=%s",
+                    "increment_chunk_num：没有匹配的知识库 知识库ID=%s for 文档ID=%s token_num=%s chunk_num=%s 持续时间=%s",
                     kb_id,
                     doc_id,
                     token_num,
@@ -808,7 +804,7 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def decrement_chunk_num(cls, doc_id, kb_id, token_num, chunk_num, duration):
-        """Atomically subtract chunk/token counters on the document and its knowledge base."""
+        """以原子方式减去文档及其知识库上的 chunk/token 计数器。"""
         with DB.atomic():
             num = (
                 cls.model.update(
@@ -831,7 +827,7 @@ class DocumentService(CommonService):
             )
             if num == 0:
                 logging.error(
-                    "decrement_chunk_num: no knowledgebase matched kb_id=%s for doc_id=%s token_num=%s chunk_num=%s duration=%s",
+                    "decrement_chunk_num：没有匹配的知识库 知识库ID=%s for 文档ID=%s token_num=%s chunk_num=%s 持续时间=%s",
                     kb_id,
                     doc_id,
                     token_num,
@@ -845,11 +841,10 @@ class DocumentService(CommonService):
     @retry_deadlock_operation()
     @DB.connection_context()
     def delete_document_and_update_kb_counts(cls, doc_id) -> bool:
-        """Atomically delete the document row and update KB counters.
+        """以原子方式删除文档行并更新 KB 计数器。
 
-        Returns True if the document was deleted by this call, False if it was
-        already deleted by a concurrent request (idempotent).
-        """
+        如果此调用删除了文档，则返回 True；如果是，则返回 False
+        已被并发请求删除（幂等）。"""
         with DB.atomic():
             doc = (
                 cls.model.select(
@@ -877,7 +872,8 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def clear_chunk_num(cls, doc_id):
-        """Deprecated: use delete_document_and_update_kb_counts instead."""
+        """已弃用：使用 delete_document_and_update_kb_counts 代替。
+        对于 GraphRAG、RAPTOR 和思维导图任务，当 keep_progress=True 时，"""
         doc = cls.model.get_by_id(doc_id)
         assert doc, "Can't find document in database."
 
@@ -1066,7 +1062,7 @@ class DocumentService(CommonService):
         if not keep_progress:
             info["progress"] = random.random() * 1 / 100.0
             info["run"] = TaskStatus.RUNNING.value
-            # keep the doc in DONE state when keep_progress=True for GraphRAG, RAPTOR and Mindmap tasks
+            # 将文档保持在 DONE 状态
 
         cls.model.update(info).where((cls.model.id == doc_id) & ((cls.model.run.is_null(True)) | (cls.model.run != TaskStatus.CANCEL.value))).execute()
 
@@ -1106,9 +1102,9 @@ class DocumentService(CommonService):
                 doc_progress = doc.progress if doc and doc.progress else 0.0
                 special_task_running = False
                 priority = 0
-                # Count this document's own not-yet-started tasks per priority so
-                # they can be excluded from the "tasks ahead in the queue" figure
-                # for the matching priority queue.
+                # 按优先级计算该文档自己的尚未启动的任务，以便
+                # 它们可以从 "tasks ahead in the queue" 图中排除
+                # 为匹配优先级队列。
                 own_queued_by_priority = {}
                 for t in tsks:
                     task_type = (t.task_type or "").lower()
@@ -1134,13 +1130,13 @@ class DocumentService(CommonService):
                 elif not finished:
                     status = TaskStatus.RUNNING.value
 
-                # only for special task and parsed docs and unfinished
+                # 仅适用于特殊任务和已解析的文档以及未完成的
                 freeze_progress = special_task_running and doc_progress >= 1 and not finished
                 msg = "\n".join(sorted(msg))
                 begin_at = d.get("process_begin_at")
                 if not begin_at:
                     begin_at = datetime.now()
-                    # fallback
+                    # 后备
                     cls.update_by_id(d["id"], {"process_begin_at": begin_at})
 
                 info = {"process_duration": max(datetime.timestamp(datetime.now()) - begin_at.timestamp(), 0), "run": status}
@@ -1149,9 +1145,9 @@ class DocumentService(CommonService):
                 if msg:
                     info["progress_msg"] = msg
                     if msg.endswith("created task graphrag") or msg.endswith("created task raptor") or msg.endswith("created task mindmap"):
-                        # Exclude this document's own queued tasks in the same
-                        # priority queue: they are not "ahead" of itself, they
-                        # ARE the work being waited on.
+                        # 在同一个文档中排除本文档自己的排队任务
+                        # 优先级队列：它们不是"ahead"本身，它们
+                        # ARE 正在等待的工作。
                         queue_ahead = max(0, get_queue_length(priority) - own_queued_by_priority.get(priority, 0))
                         info["progress_msg"] += "\n%d tasks are ahead in the queue..." % queue_ahead
                 else:
@@ -1162,7 +1158,7 @@ class DocumentService(CommonService):
                 (cls.model.update(info).where((cls.model.id == d["id"]) & ((cls.model.run.is_null(True)) | (cls.model.run != TaskStatus.CANCEL.value))).execute())
             except Exception as e:
                 if str(e).find("'0'") < 0:
-                    logging.exception("fetch task exception")
+                    logging.exception("取任务异常")
 
     @classmethod
     @DB.connection_context()
@@ -1191,17 +1187,17 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def knowledgebase_basic_info(cls, kb_id: str) -> dict[str, int]:
-        # cancelled: run == "2"
+        # 取消：运行 == "2"
         cancelled = cls.model.select(fn.COUNT(1)).where((cls.model.kb_id == kb_id) & (cls.model.run == TaskStatus.CANCEL)).scalar()
         downloaded = cls.model.select(fn.COUNT(1)).where(cls.model.kb_id == kb_id, cls.model.source_type != "local").scalar()
 
         row = (
             cls.model.select(
-                # finished: progress == 1
+                # 已完成：进度 == 1
                 fn.COALESCE(fn.SUM(Case(None, [(cls.model.progress == 1, 1)], 0)), 0).alias("finished"),
-                # failed: progress == -1
+                # 失败：进度 == -1
                 fn.COALESCE(fn.SUM(Case(None, [(cls.model.progress == -1, 1)], 0)), 0).alias("failed"),
-                # processing: 0 <= progress < 1
+                # 处理：0 <= 进度 < 1
                 fn.COALESCE(
                     fn.SUM(
                         Case(
@@ -1230,7 +1226,7 @@ class DocumentService(CommonService):
         File2Document/Document 得到对象存储地址，再由 queue_tasks 按页或按行拆分任务。
         这里仍然只是在“生产任务”，真正解析由独立 Task Executor 完成。
 
-        Args:
+        参数：
             tenant_id: 文档所属租户；用于定位 ES 索引与模型配置。
             doc: Document.to_dict() 结果，至少包含 id/kb_id/parser_id/parser_config/location。
             kb_table_num_map: 同一次批量 ingest 共享的表格知识库计数缓存，避免重复查库。
@@ -1261,10 +1257,8 @@ class DocumentService(CommonService):
 
 
 def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_ids=None):
-    """
-    You can provide a fake_doc_id to bypass the restriction of tasks at the knowledgebase level.
-    Optionally, specify a list of doc_ids to determine which documents participate in the task.
-    """
+    """您可以提供fake_doc_id来绕过知识库级别的任务限制。
+    （可选）指定 doc_ids 列表以确定哪些文档参与该任务。"""
     if doc_ids is None:
         doc_ids = []
     assert ty in [
@@ -1273,7 +1267,7 @@ def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_
         "mindmap",
         "wiki",
         "skill",
-        # KB-wide structure-graph merge task types (rebuild dataset_graph rows).
+        # KB 范围的结构图合并任务类型（重建 dataset_graph 行）。
         "structure_graph",
         "structure_mindmap",
         "timeline",
@@ -1312,19 +1306,18 @@ def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_
 
 
 def queue_per_doc_raptor_task(doc, priority):
-    """Queue a doc-scoped RAPTOR task.
+    """对文档范围的 RAPTOR 任务进行排队。
 
-    Distinct from :func:`queue_raptor_o_graphrag_tasks` (which is KB-scoped
-    and uses ``GRAPH_RAPTOR_FAKE_DOC_ID`` as the task's ``doc_id`` so it
-    fans out across the dataset). Here the task's ``doc_id`` is the real
+    与 :func:`queue_raptor_o_graphrag_tasks` 不同（这是 KB 范围的
+    和用途``GRAPH_RAPTOR_FAKE_DOC_ID`` as the task's ``doc_id`` so it
+    fans out across the dataset). Here the task's `ZXQKEEP00 610007ZXQ` is the real
     document id, so ``TaskHandler._run_raptor`` runs only on this doc's
     chunks and the RAPTOR summaries it produces are scoped to this doc.
 
     Triggered automatically at the tail of standard chunking when the
-    doc's ``parser_config["raptor"]["use_raptor"]`` is true. No
-    cross-task dedup — within one chunking-task execution this helper is
-    called at most once, which is the only invariant the caller needs.
-    """
+    doc's ``parser_config["raptor"]["use_raptor"]``是真的。否
+    跨任务重复数据删除——在一个分块任务执行中，这个助手是
+    最多调用一次，这是调用者需要的唯一不变量。"""
     chunking_config = DocumentService.get_chunking_config(doc["id"])
     hasher = xxhash.xxh64()
     for field in sorted(chunking_config.keys()):
@@ -1345,9 +1338,9 @@ def queue_per_doc_raptor_task(doc, priority):
     task["digest"] = hasher.hexdigest()
     bulk_insert_into_db(Task, [task], True)
 
-    # Redis message carries ``doc_ids`` for downstream consumers
-    # (TaskHandler._run_raptor reads it). Identical to the fake-doc
-    # path's convention so we don't have to special-case the executor.
+    # Redis消息携带“`doc_ids`”给下游消费者
+    # （TaskHandler._run_raptor 读取）。与假文档相同
+    # 路径's convention so we don't 必须对执行器进行特殊处理。
     task["doc_ids"] = [doc["id"]]
     assert REDIS_CONN.queue_product(
         settings.get_svr_queue_name(priority, "raptor"),
@@ -1356,31 +1349,30 @@ def queue_per_doc_raptor_task(doc, priority):
     return task["id"]
 
 
-# Short-lived per-priority cache for the genuine queued-task backlog so the
-# per-document progress sync does not issue a COUNT query for every document
-# each cycle. Keyed by priority (None means "all priorities").
+# 用于真正排队任务积压的短期按优先级缓存，因此
+# 每个文档进度同步不会对每个文档发出 COUNT 查询
+# 每个周期。按优先级键入（无表示 "all priorities"）。
 _PENDING_TASK_COUNT_CACHE = {}
 _PENDING_TASK_COUNT_TTL_SECONDS = 3.0
 
 
 def get_pending_task_count(priority=None):
-    """Count tasks that are genuinely still waiting to be processed.
+    """统计真正仍在等待处理的任务。
 
-    A task counts as "waiting" when it has not started yet (progress == 0) and
-    its document is neither cancelled nor failed. We deliberately do NOT require
-    the document to be RUNNING with progress in [0, 1): special tasks (graphrag/
-    raptor/mindmap) are queued via ``begin2parse(keep_progress=True)`` while the
+    当任务尚未开始时（进度 == 0），则计为 "waiting"，并且
+    它的文件既没有被取消也没有失败。我们故意做NOT要求
+    文档为 RUNNING，进度在 [0, 1)：特殊任务 (graphrag/
+    raptor/mindmap）通过“`begin2parse(keep_progress=True)`` while the
     document's own progress may already be 1, so requiring RUNNING/progress<1
     would undercount them and wrongly drop the cap to 0 while Redis lag is still
     non-zero. Only cancelled documents (run == CANCEL) and failed ones
     (progress < 0) are excluded, plus soft-deleted (invalid) documents.
 
-    When ``priority`` is given, only tasks queued at that priority are counted,
-    so the figure stays consistent with the per-priority Redis queue it caps.
+    When ``priority`”进行排队，仅计算以该优先级排队的任务，
+    因此该数字与它所限制的每个优先级 Redis 队列保持一致。
 
-    Returns None when the count cannot be determined, so callers can fall back
-    to the raw Redis stream lag.
-    """
+    当无法确定计数时返回 None，因此调用者可以回退
+    原始 Redis 流滞后。"""
     now = monotonic()
     cached = _PENDING_TASK_COUNT_CACHE.get(priority)
     if cached and cached.get("expire_at", 0.0) > now:
@@ -1395,31 +1387,30 @@ def get_pending_task_count(priority=None):
             query = query.where(Task.priority == priority)
         count = int(query.scalar() or 0)
     except Exception:
-        logging.exception("get_pending_task_count failed")
+        logging.exception("get_pending_task_count 失败")
         return None
     _PENDING_TASK_COUNT_CACHE[priority] = {"value": count, "expire_at": now + _PENDING_TASK_COUNT_TTL_SECONDS}
     return count
 
 
 def get_queue_length(priority, suffix="common"):
-    """Return how many tasks are ahead in the processing queue.
+    """返回处理队列中前面有多少任务。
 
-    The Redis stream consumer-group ``lag`` counts every message that has not
-    yet been delivered to a task executor, including messages whose tasks were
-    already cancelled/stopped. Those messages only stop counting once an
-    executor happens to read them, so after a user stops parsing the lag can
-    stay inflated indefinitely and parsing appears to hang forever
-    ("N tasks are ahead in the queue...").
+    Redis 流消费者组“`lag`”对每条未包含的消息进行计数
+    尚未传递给任务执行者，包括其任务已执行的消息
+    已经 cancelled/stopped. 这些消息只会停止计数一次
+    执行器碰巧读取了它们，因此在用户停止解析后，延迟可以
+    无限期地膨胀，解析似乎永远挂起
+    （"N tasks are ahead in the queue..."）。
 
-    To keep the figure honest, the raw lag is capped by the number of tasks
-    that are genuinely still waiting in the database, which self-heals the
-    moment work is cancelled or completes.
-    """
+    为了保持数字的真实性，原始延迟受到任务数量的限制
+    那些确实仍在数据库中等待的数据，它可以自我修复
+    工作被取消或完成的那一刻。"""
     group_info = REDIS_CONN.queue_info(settings.get_svr_queue_name(priority, suffix), SVR_CONSUMER_GROUP_NAME)
     lag = int(group_info.get("lag", 0) or 0) if group_info else 0
 
-    # Nothing queued in Redis: the answer is 0 regardless of the DB backlog, so
-    # short-circuit to avoid a COUNT/JOIN on every progress-sync cycle.
+    # Redis 中没有任何内容排队：无论 DB 积压如何，答案都是 0，因此
+    # 短路以避免每个进度同步周期出现 COUNT/JOIN。
     if lag <= 0:
         return 0
 

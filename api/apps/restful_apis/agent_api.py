@@ -71,19 +71,18 @@ from common.constants import RetCode
 from common.misc_utils import get_uuid, thread_pool_exec
 from peewee import MySQLDatabase, PostgresqlDatabase
 
-# Keeps strong references to fire-and-forget tasks so they are not GC'd before completion.
+# 保留对即发即弃任务的强引用，以便它们在完成之前不会被 GC 处理。
 _background_tasks: Set[asyncio.Task] = set()
 
 
 def _canvas_json_default(obj):
-    """Fallback serializer for canvas SSE events.
+    """画布 SSE 事件的后备序列化器。
 
-    Agent components store functools.partial objects as deferred streaming
-    handles (see llm.py, agent_with_tools.py, message.py). These leak into
-    SSE event dicts via component input/output propagation and are not
-    JSON-serializable. This handler converts them to None so that downstream
-    consumers never receive opaque ``str(partial(...))`` representations.
-    """
+    Agent 组件将 functools.partial 对象存储为延迟流
+    手柄（参见 llm.py、agent_with_tools.py、message.py）。这些泄漏到
+    SSE 事件字典通过组件 input/output 传播而不是
+    JSON-可序列化。该处理程序将它们转换为 None 以便下游
+    消费者永远不会收到不透明的“`str(partial(...))`”陈述。"""
     if callable(obj):
         return None
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
@@ -246,7 +245,26 @@ async def _run_workflow_session(
     stream,
     chat_template_kwargs=None,
 ):
+    """执行一次智能体画布会话，并统一处理 SSE、消息持久化和运行时副本提交。
+
+    Canvas 产生的是 node/message 事件；这里把 message 内容、reference、structured
+    output 和可选 trace 聚合成会话结果。只有整轮结束后才写 API4Conversation，
+    避免每个节点事件都触发一次数据库写入。
+    """
+    logging.info(
+        "智能体运行已开始 租户ID=%s 智能体ID=%s 会话ID=%s 是否流式=%s 是否返回轨迹=%s 文件数=%d 输入字段=%s",
+        tenant_id,
+        agent_id,
+        session_id,
+        stream,
+        return_trace,
+        len(files or []),
+        sorted((inputs or {}).keys()),
+    )
+
     async def commit_runtime_replica():
+        # 运行时组件可能更新画布内部状态；提交到用户级运行副本，而不是直接覆盖
+        # UserCanvas 中正在编辑或发布的流程定义。
         commit_ok = CanvasReplicaService.commit_after_run(
             canvas_id=agent_id,
             tenant_id=str(tenant_id),
@@ -257,7 +275,7 @@ async def _run_workflow_session(
         )
         if not commit_ok:
             logging.error(
-                "Canvas runtime replica commit failed: canvas_id=%s tenant_id=%s runtime_user_id=%s",
+                "Canvas 运行时副本提交失败：canvas_id=%s 租户ID=%s runtime_用户ID=%s",
                 agent_id,
                 tenant_id,
                 user_id,
@@ -304,6 +322,17 @@ async def _run_workflow_session(
         workflow_conv["source"] = workflow_conv.get("source") or "workflow"
         await thread_pool_exec(API4ConversationService.append_message, session_id, workflow_conv)
         await commit_runtime_replica()
+        logging.info(
+            "智能体运行完成 租户ID=%s 智能体ID=%s 会话ID=%s 是否流式=%s 内容长度=%d 引用组数=%d 轨迹节点数=%d 结构化输出节点数=%d",
+            tenant_id,
+            agent_id,
+            session_id,
+            stream,
+            len(full_content),
+            len(reference),
+            len(trace_items),
+            len(structured_output),
+        )
 
     if stream:
 
@@ -347,12 +376,12 @@ async def _run_workflow_session(
                     if trace_items:
                         final_ans["data"]["trace"] = trace_items
                 else:
-                    # Canvas produced no events (e.g. empty query). Still
-                    # surface the session_id so the client can resume the
-                    # conversation — without it the SSE stream is just a
-                    # bare [DONE] (fixes #15169).
+                    # Canvas 未产生任何事件（e.g。空查询）。仍然
+                    # 表面 session_id 以便客户端可以恢复
+                    # 对话 — 没有它，SSE 流只是一个
+                    # 裸露 [DONE]（修复#15169）。
                     logging.info(
-                        "empty agent output - returning session_id (agent_id=%s session_id=%s stream=%s)",
+                        "空代理输出 - 返回 session_id (智能体ID=%s 会话ID=%s流=%s)",
                         agent_id,
                         session_id,
                         True,
@@ -401,12 +430,12 @@ async def _run_workflow_session(
         return get_result(data=f"**ERROR**: {str(exc)}")
 
     if not final_ans:
-        # Canvas produced no events (e.g. caller sent an empty query). The
-        # API contract still promises a session_id back so the client can
-        # resume the conversation — return it instead of an empty dict
-        # (fixes #15169).
+        # Canvas 未产生任何事件（e.g。调用者发送了空查询）。的
+        # API 合约仍承诺返还 session_id，以便客户可以
+        # 恢复对话 — 返回它而不是空字典
+        # （修复#15169）。
         logging.info(
-            "empty agent output - returning session_id (agent_id=%s session_id=%s stream=%s)",
+            "空代理输出 - 返回 session_id (智能体ID=%s 会话ID=%s流=%s)",
             agent_id,
             session_id,
             False,
@@ -586,13 +615,13 @@ async def delete_agent_session(tenant_id, agent_id):
 @add_tenant_id_to_kwargs
 async def download_agent_file(tenant_id):
     id = request.args.get("id")
-    logging.info("Agent file download requested: tenant_id=%s file_id=%s", tenant_id, id)
+    logging.info("Agent 请求文件下载：租户ID=%s 文件ID=%s", tenant_id, id)
     blob = await thread_pool_exec(FileService.get_blob, tenant_id, id)
     return Response(blob)
 
 
 async def _iter_session_completion_events(tenant_id, agent_id, req, return_trace):
-    # Stream and non-stream session completions share the same event parsing and trace injection.
+    # 流和非流会话完成共享相同的事件解析和跟踪注入。
     trace_items = []
     async for answer in agent_completion(tenant_id=tenant_id, agent_id=agent_id, **req):
         if isinstance(answer, str):
@@ -620,7 +649,7 @@ async def _iter_session_completion_events(tenant_id, agent_id, req, return_trace
         if event in ["message", "message_end", "user_inputs"]:
             if event == "user_inputs":
                 logging.debug(
-                    "Forwarding session completion event: tenant_id=%s agent_id=%s event=%s",
+                    "转发会话完成事件：租户ID=%s 智能体ID=%s event=%s",
                     tenant_id,
                     agent_id,
                     event,
@@ -629,11 +658,11 @@ async def _iter_session_completion_events(tenant_id, agent_id, req, return_trace
             continue
 
         if event == "workflow_finished":
-            # Forward only the run-level aggregated token usage, not the whole terminal
-            # payload (inputs/outputs), so the session completion stream surface stays
-            # limited to what the usage contract needs.
+            # 仅转发运行级别聚合令牌使用情况，而不转发整个终端
+            # 有效负载 (inputs/outputs)，因此会话完成流表面保持不变
+            # 仅限于使用合同需要的内容。
             logging.debug(
-                "Forwarding session completion event: tenant_id=%s agent_id=%s event=%s",
+                "转发会话完成事件：租户ID=%s 智能体ID=%s event=%s",
                 tenant_id,
                 agent_id,
                 event,
@@ -671,9 +700,9 @@ def prompts():
     )
 
 
-# Synthetic ``canvas_category`` the frontend passes to list compilation template
-# groups through the merged /agents endpoint. Also the ``type`` discriminator
-# stamped on group items in the merged response.
+# 前端传递给列表编译模板的合成``canvas_category``
+# 通过合并的 /agents 端点进行分组。还有“`type`”鉴别器
+# 标记在合并响应中的组项目上。
 _COMPILATION_TEMPLATE_GROUP_CATEGORY = "compilation_template_group"
 
 
@@ -725,10 +754,10 @@ def list_agents(tenant_id):
         effective_owner_ids = list(authorized_owner_ids)
     include_template_groups = tenant_id in effective_owner_ids
 
-    # Groups-only: when ``compilation_template_group`` is the only selected
-    # category, return just the caller's template groups (no agents) via
-    # list_saved, so the frontend can render a dedicated tab. list_saved
-    # paginates in Python.
+    # 仅组：当仅选择“`compilation_template_group`”时
+    # 类别，仅返回调用者的模板组（无代理）
+    # list_saved，因此前端可以渲染专用选项卡。 list_saved
+    # 在 Python 中分页。
     if canvas_category_list == [_COMPILATION_TEMPLATE_GROUP_CATEGORY]:
         from api.db.services.compilation_template_group_service import CompilationTemplateGroupService
 
@@ -737,7 +766,7 @@ def list_agents(tenant_id):
             try:
                 groups = CompilationTemplateGroupService.list_saved(tenant_id, keywords, "", order_by, desc)
             except Exception:
-                logging.exception("list_agents: compilation template group list failed for tenant=%s", tenant_id)
+                logging.exception("list_agents：租户 = %s 的编译模板组列表失败", tenant_id)
         for group in groups:
             group["type"] = _COMPILATION_TEMPLATE_GROUP_CATEGORY
         total = len(groups)
@@ -746,22 +775,22 @@ def list_agents(tenant_id):
             groups = groups[start : start + items_per_page]
         return get_json_result(data={"canvas": groups, "total": total})
 
-    # Split selected categories: ``compilation_template_group`` is synthetic
-    # (resolves to template groups, not agents); everything else filters
-    # agents by canvas_category IN (...).
+    # 拆分所选类别：“`compilation_template_group`”是合成的
+    # （解析为模板组，而不是代理）；其他一切都会被过滤
+    # 代理为 canvas_category IN (...)。
     wants_groups = _COMPILATION_TEMPLATE_GROUP_CATEGORY in canvas_category_list
     agent_categories = [c for c in canvas_category_list if c != _COMPILATION_TEMPLATE_GROUP_CATEGORY]
 
-    # Merge mode: with no ``canvas_category`` (and no agent-only filters), list
-    # the caller's compilation template groups alongside agents, interleaved by
-    # ``update_time``. ``canvas_type`` / ``tags`` are agent-only concepts, so
-    # their presence keeps the response agent-only.
+    # 合并模式：没有“`canvas_category`”（并且没有仅代理过滤器），列表
+    # 调用者的编译模板与代理一起分组，由
+    # ``update_time``. ``canvas_type`` / ``tags`` 是仅代理的概念，因此
+    # 它们的存在使响应代理仅限于响应代理。
     merge_groups = not canvas_category_list and not canvas_type and not tags
     if merge_groups:
         from api.db.services.compilation_template_group_service import CompilationTemplateGroupService
 
-        # Fetch every matching agent (page_number=0 disables SQL pagination) so
-        # the two sources can be globally ordered before we page in Python.
+        # 获取每个匹配的代理（page_number=0 禁用 SQL 分页）
+        # 这两个来源可以在我们页面 Python 之前全局订购。
         agents, _ = UserCanvasService.get_by_tenant_ids(
             effective_owner_ids,
             tenant_id,
@@ -774,14 +803,14 @@ def list_agents(tenant_id):
             tags,
             canvas_type,
         )
-        # Groups are owner-only (no team sharing), so they're scoped to the
-        # caller. Keyword filters the group name; scope is left unfiltered.
+        # 组仅限所有者（无团队共享），因此它们的范围为
+        # 呼叫者。关键字过滤群组名称；范围未过滤。
         groups = []
         if include_template_groups:
             try:
                 groups = CompilationTemplateGroupService.list_saved(tenant_id, keywords, "", order_by, desc)
             except Exception:
-                logging.exception("list_agents: compilation template group merge failed for tenant=%s", tenant_id)
+                logging.exception("list_agents：租户 = %s 的编译模板组合并失败", tenant_id)
 
         items: list[dict] = []
         for agent in agents:
@@ -792,8 +821,8 @@ def list_agents(tenant_id):
             group["title"] = group["name"]
             items.append(group)
 
-        # Interleave by update_time (the requested merge key); items missing the
-        # field sort as oldest.
+        # 通过 update_time 进行交织（请求的合并密钥）；缺少的项目
+        # 字段排序为最旧。
         items.sort(key=lambda item: item.get("update_time") or 0, reverse=desc)
 
         total = len(items)
@@ -803,9 +832,9 @@ def list_agents(tenant_id):
 
         return get_json_result(data={"canvas": items, "total": total})
 
-    # Mixed mode: both template groups and agent categories are selected - fetch
-    # agents filtered by the agent categories and merge with template groups,
-    # interleaved by ``update_time`` (same merge strategy as merge mode).
+    # 混合模式：同时选择模板组和代理类别 - 获取
+    # 代理按代理类别过滤并与模板组合并，
+    # 由 ``update_time`` 交错（与合并模式相同的合并策略）。
     if wants_groups and agent_categories:
         from api.db.services.compilation_template_group_service import CompilationTemplateGroupService
 
@@ -826,7 +855,7 @@ def list_agents(tenant_id):
             try:
                 groups = CompilationTemplateGroupService.list_saved(tenant_id, keywords, "", order_by, desc)
             except Exception:
-                logging.exception("list_agents: compilation template group mixed failed for tenant=%s", tenant_id)
+                logging.exception("list_agents：租户 = %s 的编译模板组混合失败", tenant_id)
 
         items = []
         for agent in agents:
@@ -865,13 +894,13 @@ def list_agents(tenant_id):
 @login_required
 @add_tenant_id_to_kwargs
 def list_agent_tags(tenant_id):
-    """Aggregate tag usage counts across agents visible to the caller."""
+    """呼叫者可见的代理之间的聚合标签使用计数。"""
     canvas_category = request.args.get("canvas_category")
     tenants = TenantService.get_joined_tenants_by_user_id(tenant_id)
     joined_ids = list({member["tenant_id"] for member in tenants} | {tenant_id})
     counts = UserCanvasService.list_tags(joined_ids, tenant_id, canvas_category)
     logging.info(
-        "list_agent_tags tenant=%s canvas_category=%s tags_count=%d",
+        "list_agent_tags 租户=%s canvas_category=%s tags_count=%d",
         tenant_id,
         canvas_category,
         len(counts),
@@ -885,7 +914,7 @@ def list_agent_tags(tenant_id):
 async def update_agent_tags(tenant_id, canvas_id):
     if not UserCanvasService.accessible(canvas_id, tenant_id):
         logging.info(
-            "update_agent_tags denied tenant=%s canvas_id=%s reason=no_permission",
+            "update_agent_tags 拒绝租户=%s canvas_id=%s 原因=no_permission",
             tenant_id,
             canvas_id,
         )
@@ -900,7 +929,7 @@ async def update_agent_tags(tenant_id, canvas_id):
     rows_affected = UserCanvasService.update_tags(canvas_id, tags)
     if rows_affected == 0:
         logging.info(
-            "update_agent_tags miss tenant=%s canvas_id=%s incoming_count=%d rows=0",
+            "update_agent_tags 小姐租户=%s canvas_id=%s incoming_count=%d 行=0",
             tenant_id,
             canvas_id,
             len(incoming),
@@ -911,7 +940,7 @@ async def update_agent_tags(tenant_id, canvas_id):
             code=RetCode.OPERATING_ERROR,
         )
     logging.info(
-        "update_agent_tags ok tenant=%s canvas_id=%s incoming_count=%d rows=%d",
+        "update_agent_tags 好的租户=%s canvas_id=%s incoming_count=%d行=%d",
         tenant_id,
         canvas_id,
         len(incoming),
@@ -924,6 +953,7 @@ async def update_agent_tags(tenant_id, canvas_id):
 @login_required
 @add_tenant_id_to_kwargs
 async def create_agent(tenant_id):
+    """保存智能体主记录和最新版本快照，并创建可运行的画布副本。"""
     req = {k: v for k, v in (await get_request_json()).items() if v is not None}
     req["canvas_type"] = req.get("canvas_type", "")
     req["user_id"] = tenant_id
@@ -984,6 +1014,13 @@ async def create_agent(tenant_id):
     exists, created_agent = UserCanvasService.get_by_canvas_id(req["id"])
     if not exists:
         return get_data_error_result(message="Fail to create agent.")
+    logging.info(
+        "智能体已创建 租户ID=%s 智能体ID=%s 类型=%s 是否发布=%s",
+        tenant_id,
+        req["id"],
+        req["canvas_category"],
+        req["release"],
+    )
     return get_json_result(data=created_agent)
 
 
@@ -995,7 +1032,7 @@ async def upload_agent_file(agent_id, tenant_id):
     files = await request.files
     file_objs = files.getlist("file") if files and files.get("file") else []
     logging.info(
-        "Agent file upload requested: tenant_id=%s agent_id=%s file_count=%s",
+        "Agent 文件上传请求：租户ID=%s 智能体ID=%s file_count=%s",
         tenant_id,
         agent_id,
         len(file_objs),
@@ -1008,7 +1045,7 @@ async def upload_agent_file(agent_id, tenant_id):
         return get_json_result(data=results)
     except Exception as exc:
         logging.exception(
-            "Agent file upload failed: tenant_id=%s agent_id=%s",
+            "Agent 文件上传失败：租户ID=%s 智能体ID=%s",
             tenant_id,
             agent_id,
         )
@@ -1038,6 +1075,7 @@ def get_agent_component_input_form(agent_id, component_id, tenant_id):
 @add_tenant_id_to_kwargs
 @_require_canvas_access_async
 async def debug_agent_component(agent_id, component_id, tenant_id):
+    """只执行指定组件的调试入口；不会像完整画布运行那样推进整张图。"""
     req = await get_request_json()
     try:
         from agent.canvas import Canvas
@@ -1049,6 +1087,15 @@ async def debug_agent_component(agent_id, component_id, tenant_id):
         canvas.message_id = get_uuid()
         component = canvas.get_component(component_id)["obj"]
         component.reset()
+
+        logging.info(
+            "智能体组件调试已开始 租户ID=%s 智能体ID=%s 组件ID=%s 组件类型=%s 输入字段=%s",
+            tenant_id,
+            agent_id,
+            component_id,
+            type(component).__name__,
+            sorted(req["params"].keys()),
+        )
 
         if isinstance(component, LLM):
             component.set_debug_inputs(req["params"])
@@ -1065,6 +1112,13 @@ async def debug_agent_component(agent_id, component_id, tenant_id):
                     for c in iter_obj:
                         txt += c
                 outputs[k] = txt
+        logging.info(
+            "智能体组件调试完成 租户ID=%s 智能体ID=%s 组件ID=%s 输出字段=%s",
+            tenant_id,
+            agent_id,
+            component_id,
+            sorted(outputs.keys()),
+        )
         return get_json_result(data=outputs)
     except Exception as exc:
         return server_error_response(exc)
@@ -1175,6 +1229,7 @@ def delete_agent(agent_id, tenant_id):
 @add_tenant_id_to_kwargs
 @_require_canvas_access_async
 async def update_agent(agent_id, tenant_id):
+    """更新可编辑 Canvas，并在 DSL 变化时同步版本快照与运行时 replica。"""
     req = {k: v for k, v in (await get_request_json()).items() if v is not None}
     req["canvas_type"] = req.get("canvas_type", "")
     req["release"] = bool(req.get("release", ""))
@@ -1225,6 +1280,14 @@ async def update_agent(agent_id, tenant_id):
             return get_data_error_result(message="agent saved, but replica sync failed.")
 
     _, updated_agent = UserCanvasService.get_by_id(agent_id)
+    logging.info(
+        "智能体配置已更新 租户ID=%s 智能体ID=%s 变更字段=%s 流程定义是否变化=%s 是否发布=%s",
+        tenant_id,
+        agent_id,
+        sorted(req.keys()),
+        "dsl" in req,
+        req.get("release", False),
+    )
     return get_json_result(data={"update_time": updated_agent.update_time})
 
 
@@ -1273,7 +1336,7 @@ async def rerun_agent(tenant_id):
     doc = doc[0]
     if not DocumentService.accessible(doc["id"], tenant_id):
         logging.warning(
-            "rerun_agent denied: tenant_id=%s log_id=%s doc_id=%s",
+            "rerun_agent 被拒绝：租户ID=%s log_id=%s 文档ID=%s",
             tenant_id,
             req["id"],
             doc["id"],
@@ -1317,7 +1380,7 @@ async def test_db_connection():
         safe_host = assert_host_is_safe(req["host"])
     except ValueError as exc:
         logging.warning(
-            "Rejected test_db_connection: unsafe host %r (db_type=%s, user=%s): %s",
+            "拒绝 test_db_connection：不安全主机 %r（db_type=%s，用户=%s）： %s",
             req.get("host"),
             req.get("db_type"),
             current_user.id,
@@ -1326,13 +1389,13 @@ async def test_db_connection():
         return get_data_error_result(message=str(exc))
     except OSError as exc:
         logging.warning(
-            "Rejected test_db_connection: cannot resolve host %r (db_type=%s, user=%s): %s",
+            "被拒绝 test_db_connection：无法解析主机 %r（db_type=%s，用户=%s）： %s",
             req.get("host"),
             req.get("db_type"),
             current_user.id,
             exc,
         )
-        logging.debug("Full resolver exception for host %r", req.get("host"), exc_info=True)
+        logging.debug("主机的完整解析器异常 %r", req.get("host"), exc_info=True)
         return get_data_error_result(message=f"Could not resolve host {req.get('host')!r}.")
     try:
         if req["db_type"] in ["mysql", "mariadb"]:
@@ -1437,29 +1500,31 @@ async def test_db_connection():
         return server_error_response(exc)
 
 
-# NOTE: The singular form `/agents/chat/completion` was a historical typo
-# in earlier releases — no client, SDK, or doc ever used it, and the
-# plural form below is the canonical route. The singular is intentionally
-# NOT registered; clients sending it receive 404.
+# NOTE：单数形式 `/agents/chat/completion` 是一个历史拼写错误
+# 早期版本中的
+# — 没有客户端、SDK 或文档曾经使用过它，并且
+# 下面的
+# 复数形式是规范路线。单数是故意的
+# NOT 已注册；发送它的客户端收到 404。
 @manager.route("/agents/chat/completions", methods=["POST"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
 async def agent_chat_completion(tenant_id, agent_id=None):
-    # This endpoint serves two execution modes:
-    # 1. Draft/runtime execution without session state. The request runs against the caller's
-    #    runtime replica, which is populated from the editable canvas state.
-    # 2. Session continuation with an existing session_id. The request resumes from the stored
-    #    API4Conversation state and must stay bound to the same agent and an accessible canvas.
+    # 该端点有两种执行模式：
+    # 1. Draft/runtime 执行无会话状态。该请求针对调用者的运行
+    # 运行时副本，从可编辑画布状态填充。
+    # 2. 使用现有 session_id 继续会话。请求从存储的恢复
+    # API4Conversation 状态，并且必须保持绑定到同一代理和可访问的画布。
     #
-    # Security constraints:
-    # - agent_id is always supplied at the route layer and is not forwarded downstream as a free-form kwarg.
-    # - New runs without session_id must pass UserCanvasService.accessible(...) before the runtime replica is loaded.
-    # - Existing sessions are validated here at the route layer before handing control to the lower-level
-    #   completion functions, so canvas_service only executes a pre-authorized session payload.
+    # 安全约束：
+    # - agent_id 始终在路由层提供，并且不会作为自由格式 kwarg 向下游转发。
+    # - 在加载运行时副本之前，没有 session_id 的新运行必须通过 UserCanvasService.accessible(...)。
+    # - 在将控制权交给较低级别之前，现有会话在路由层进行验证
+    # 完成功能，因此canvas_service仅执行预授权的会话负载。
     #
-    # Response modes:
-    # - Regular mode emits internal agent events.
-    # - openai-compatible mode reshapes the same execution into an OpenAI-like wire format.
+    # 响应模式：
+    # - 常规模式发出内部代理事件。
+    # - openai 兼容模式将相同的执行重塑为类似 OpenAI 的有线格式。
     req = await get_request_json()
     agent_id = agent_id or req.get("agent_id")
     openai_compatible = bool(req.get("openai-compatible", False))
@@ -1469,7 +1534,7 @@ async def agent_chat_completion(tenant_id, agent_id=None):
             message="`agent_id` is required.",
             code=RetCode.ARGUMENT_ERROR,
         )
-    # Route-level selectors should not be forwarded into the lower-level completion functions.
+    # 路由级别选择器不应转发到较低级别的完成函数中。
     req = dict(req)
     req.pop("agent_id", None)
     req.pop("openai-compatible", None)
@@ -1496,8 +1561,18 @@ async def agent_chat_completion(tenant_id, agent_id=None):
         if workflow_session:
             workflow_conv = conv.to_dict()
 
+    logging.info(
+        "智能体回答请求已接收 租户ID=%s 智能体ID=%s 会话ID=%s 是否兼容OpenAI=%s 是否工作流会话=%s 是否流式=%s",
+        tenant_id,
+        agent_id,
+        session_id or "new",
+        openai_compatible,
+        workflow_session,
+        bool(req.get("stream", False)),
+    )
+
     if openai_compatible:
-        # OpenAI-compatible mode uses a different wire format, keep it separate from regular agent events.
+        # OpenAI 兼容模式使用不同的线路格式，使其与常规代理事件分开。
         messages = req.get("messages", [])
         if not messages:
             return get_data_error_result(message="You must provide at least one message.")
@@ -1599,8 +1674,8 @@ async def agent_chat_completion(tenant_id, agent_id=None):
                 code=RetCode.OPERATING_ERROR,
             )
 
-        # Load the caller's runtime replica as the workflow template. Session-owned
-        # history and execution state are reset after Canvas instantiation below.
+        # 加载调用者的运行时副本作为工作流模板。会话拥有的
+        # 历史记录和执行状态在下面的 Canvas 实例化后重置。
         query = req.get("query", "") or req.get("question", "")
         files = req.get("files", [])
         inputs = req.get("inputs", {})
@@ -1748,12 +1823,12 @@ async def agent_chat_completion(tenant_id, agent_id=None):
                 emitted = True
                 yield "data:" + json.dumps(ans, ensure_ascii=False, default=_canvas_json_default) + "\n\n"
             if not emitted:
-                # Parity with the new-session SSE path: if the canvas yields
-                # no events on an existing session (e.g. empty query), still
-                # echo the session_id so clients can recover it instead of
-                # seeing only a bare [DONE] (fixes #15169).
+                # 与新会话 SSE 路径的奇偶校验：如果画布产生
+                # 现有会话上没有事件（e.g。空查询），仍然
+                # 回显 session_id，以便客户端可以恢复它而不是
+                # 只能看到一个裸露的 [DONE]（修复#15169）。
                 logging.info(
-                    "empty agent output - returning session_id (agent_id=%s session_id=%s stream=%s)",
+                    "空代理输出 - 返回 session_id (智能体ID=%s 会话ID=%s流=%s)",
                     agent_id,
                     session_id,
                     True,
@@ -1789,8 +1864,8 @@ async def agent_chat_completion(tenant_id, agent_id=None):
                         }
                     )
             if ans.get("event") == "workflow_finished":
-                # Capture the run-level usage but keep message_end/user_inputs as
-                # final_ans so the non-stream response shape stays unchanged.
+                # 捕获运行级别使用情况，但将 message_end/user_inputs 保留为
+                # final_ans 因此非流响应形状保持不变。
                 run_usage = ans.get("data", {}).get("usage")
                 continue
             if ans.get("event") == "message_end":
@@ -1801,12 +1876,12 @@ async def agent_chat_completion(tenant_id, agent_id=None):
             return get_result(data=f"**ERROR**: {str(exc)}")
 
     if not final_ans:
-        # Same contract as the new-session path: even when the canvas
-        # emits nothing (e.g. empty query against an existing session),
-        # echo the session_id back so the client can keep using it
-        # (fixes #15169).
+        # 与新会话路径相同的合约：即使画布
+        # 不发出任何内容（e.g.针对现有会话的空查询），
+        # 回显 session_id，以便客户端可以继续使用它
+        # （修复#15169）。
         logging.info(
-            "empty agent output - returning session_id (agent_id=%s session_id=%s stream=%s)",
+            "空代理输出 - 返回 session_id (智能体ID=%s 会话ID=%s流=%s)",
             agent_id,
             session_id,
             False,
@@ -1837,7 +1912,7 @@ async def webhook(agent_id: str):
 async def webhook_test(agent_id: str, tenant_id: str):
     if not UserCanvasService.query(user_id=tenant_id, id=agent_id):
         logging.warning(
-            "Webhook test denied: owner check failed agent_id=%s tenant_id=%s method=%s",
+            "Webhook 测试被拒绝：所有者检查失败 智能体ID=%s 租户ID=%s method=%s",
             agent_id,
             tenant_id,
             request.method,
@@ -1849,21 +1924,21 @@ async def webhook_test(agent_id: str, tenant_id: str):
 async def _webhook_impl(agent_id: str, is_test: bool):
     start_ts = time.time()
 
-    # 1. Fetch canvas by agent_id
+    # 1.通过agent_id获取画布
     exists, cvs = UserCanvasService.get_by_id(agent_id)
     if not exists:
         return get_data_error_result(code=RetCode.BAD_REQUEST, message="Canvas not found."), RetCode.BAD_REQUEST
 
-    # 2. Check canvas category
+    # 2.查看画布类别
     if cvs.canvas_category == CanvasCategory.DataFlow:
         return get_data_error_result(code=RetCode.BAD_REQUEST, message="Dataflow can not be triggered by webhook."), RetCode.BAD_REQUEST
 
-    # 3. Load DSL from canvas
+    # 3.从画布加载DSL
     dsl = getattr(cvs, "dsl", None)
     if not isinstance(dsl, dict):
         return get_data_error_result(code=RetCode.BAD_REQUEST, message="Invalid DSL format."), RetCode.BAD_REQUEST
 
-    # 4. Check webhook configuration in DSL
+    # 4.检查DSL中的webhook配置
     webhook_cfg = {}
     components = dsl.get("components", {})
     for k, _ in components.items():
@@ -1874,39 +1949,39 @@ async def _webhook_impl(agent_id: str, is_test: bool):
     if not webhook_cfg:
         return get_data_error_result(code=RetCode.BAD_REQUEST, message="Webhook not configured for this agent."), RetCode.BAD_REQUEST
 
-    # 5. Validate request method against webhook_cfg.methods
+    # 5. 根据 webhook_cfg.methods 验证请求方法
     allowed_methods = webhook_cfg.get("methods", [])
     request_method = request.method.upper()
     if allowed_methods and request_method not in allowed_methods:
         return get_data_error_result(code=RetCode.BAD_REQUEST, message=f"HTTP method '{request_method}' not allowed for this webhook."), RetCode.BAD_REQUEST
 
     async def validate_webhook_security(security_cfg: dict):
-        """Validate webhook security rules based on security configuration."""
+        """根据安全配置验证 webhook 安全规则。"""
 
         if not isinstance(security_cfg, dict) or not security_cfg:
             logging.warning(
-                "Webhook denied: missing security config agent_id=%s method=%s",
+                "Webhook 被拒绝：缺少安全配置 智能体ID=%s 方法=%s",
                 agent_id,
                 request.method,
             )
             raise Exception("Webhook security is required. Set allow_anonymous to true to permit unauthenticated webhooks.")
 
-        # 1. Validate max body size
+        # 1. 验证最大车身尺寸
         await _validate_max_body_size(security_cfg)
 
-        # 2. Validate IP whitelist
+        # 2.验证IP白名单
         _validate_ip_whitelist(security_cfg)
 
-        # # 3. Validate rate limiting
+        # 3. 验证速率限制
         _validate_rate_limit(security_cfg)
 
-        # 4. Validate authentication
+        # 4. 验证认证
         auth_type = security_cfg.get("auth_type", "none")
 
         if auth_type == "none":
             if not _allow_anonymous_webhook(security_cfg):
                 logging.warning(
-                    "Webhook denied: anonymous access missing explicit opt-in agent_id=%s method=%s",
+                    "Webhook 被拒绝：匿名访问缺少显式选择加入 智能体ID=%s 方法=%s",
                     agent_id,
                     request.method,
                 )
@@ -1926,12 +2001,12 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             raise Exception(f"Unsupported auth_type: {auth_type}")
 
     async def _validate_max_body_size(security_cfg):
-        """Check request size does not exceed max_body_size."""
+        """检查请求大小不超过 max_body_size。"""
         max_size = security_cfg.get("max_body_size")
         if not max_size:
             max_size = "10MB"
 
-        # Convert "10MB" → bytes
+        # 转换 "10MB" → 字节
         units = {"kb": 1024, "mb": 1024**2}
         size_str = max_size.lower()
 
@@ -1950,7 +2025,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             raise Exception(f"Request body too large: {content_length} > {limit}")
 
     def _validate_ip_whitelist(security_cfg):
-        """Allow only IPs listed in ip_whitelist."""
+        """仅允许 ip_whitelist 中列出的 IPs。"""
         whitelist = security_cfg.get("ip_whitelist", [])
         if not whitelist:
             return
@@ -1959,18 +2034,18 @@ async def _webhook_impl(agent_id: str, is_test: bool):
 
         for rule in whitelist:
             if "/" in rule:
-                # CIDR notation
+                # CIDR 符号
                 if ipaddress.ip_address(client_ip) in ipaddress.ip_network(rule, strict=False):
                     return
             else:
-                # Single IP
+                # 单 IP
                 if client_ip == rule:
                     return
 
         raise Exception(f"IP {client_ip} is not allowed by whitelist")
 
     def _validate_rate_limit(security_cfg):
-        """Simple in-memory rate limiting."""
+        """简单的内存速率限制。"""
         rl = security_cfg.get("rate_limit")
         if not rl:
             rl = {"limit": 60, "per": "minute"}
@@ -2014,7 +2089,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             raise Exception(f"Rate limit error: {e}")
 
     def _validate_token_auth(security_cfg):
-        """Validate header-based token authentication."""
+        """验证基于标头的令牌身份验证。"""
         token_cfg = security_cfg.get("token", {})
         header = token_cfg.get("token_header")
         token_value = token_cfg.get("token_value")
@@ -2024,7 +2099,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             raise Exception("Invalid token authentication")
 
     def _validate_basic_auth(security_cfg):
-        """Validate HTTP Basic Auth credentials."""
+        """验证 HTTP 基本身份验证凭据。"""
         auth_cfg = security_cfg.get("basic_auth", {})
         username = auth_cfg.get("username")
         password = auth_cfg.get("password")
@@ -2034,7 +2109,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             raise Exception("Invalid Basic Auth credentials")
 
     def _validate_jwt_auth(security_cfg):
-        """Validate JWT token in Authorization header."""
+        """验证授权标头中的 JWT 令牌。"""
         jwt_cfg = security_cfg.get("jwt", {})
         secret = jwt_cfg.get("secret")
         if not secret:
@@ -2112,17 +2187,17 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         resp.status_code = RetCode.BAD_REQUEST
         return resp
 
-    # 7. Parse request body
+    # 7. 解析请求体
     async def parse_webhook_request(content_type):
-        """Parse request based on content-type and return structured data."""
+        """根据content-type解析请求并返回结构化数据。"""
 
-        # 1. Query
+        # 1. 查询
         query_data = {k: v for k, v in request.args.items()}
 
-        # 2. Headers
+        # 2. 标头
         header_data = {k: v for k, v in request.headers.items()}
 
-        # 3. Body
+        # 3. 本体
         ctype = request.headers.get("Content-Type", "").split(";")[0].strip()
         if ctype and ctype != content_type:
             raise ValueError(f"Invalid Content-Type: expect '{content_type}', got '{ctype}'")
@@ -2147,9 +2222,9 @@ async def _webhook_impl(agent_id: str, is_test: bool):
                     raise Exception("Too many uploaded files")
                 for key, file in files.items():
                     desc = FileService.upload_info(
-                        cvs.user_id,  # user
-                        file,  # FileStorage
-                        None,  # url (None for webhook)
+                        cvs.user_id,  # 用户
+                        file,  # FileStorage 文件对象
+                        None,  # url（不适用于 webhook）
                     )
                     file_parsed = await canvas.get_files_async([desc])
                     body_data[key] = file_parsed
@@ -2159,7 +2234,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
                 body_data = dict(form)
 
             else:
-                # text/plain / octet-stream / empty / unknown
+                # text/plain /八位字节流/空/未知
                 raw = await request.get_data()
                 if raw:
                     try:
@@ -2180,12 +2255,10 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         }
 
     def extract_by_schema(data, schema, name="section"):
-        """
-        Extract only fields defined in schema.
-        Required fields must exist.
-        Optional fields default to type-based default values.
-        Type validation included.
-        """
+        """仅提取架构中定义的字段。
+        必填字段必须存在。
+        可选字段默认为基于类型的默认值。
+        包括类型验证。"""
         props = schema.get("properties", {})
         required = schema.get("required", [])
 
@@ -2194,24 +2267,24 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         for field, field_schema in props.items():
             field_type = field_schema.get("type")
 
-            # 1. Required field missing
+            # 1. 缺少必填字段
             if field in required and field not in data:
                 raise Exception(f"{name} missing required field: {field}")
 
-            # 2. Optional → default value
+            # 2. 可选 → 默认值
             if field not in data:
                 extracted[field] = default_for_type(field_type)
                 continue
 
             raw_value = data[field]
 
-            # 3. Auto convert value
+            # 3.自动转换数值
             try:
                 value = auto_cast_value(raw_value, field_type)
             except Exception as e:
                 raise Exception(f"{name}.{field} auto-cast failed: {str(e)}")
 
-            # 4. Type validation
+            # 4. 类型验证
             if not validate_type(value, field_type):
                 raise Exception(f"{name}.{field} type mismatch: expected {field_type}, got {type(value).__name__}")
 
@@ -2220,7 +2293,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         return extracted
 
     def default_for_type(t):
-        """Return default value for the given schema type."""
+        """返回给定模式类型的默认值。"""
         if t == "file":
             return []
         if t == "object":
@@ -2238,15 +2311,15 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         return None
 
     def auto_cast_value(value, expected_type):
-        """Convert string values into schema type when possible."""
+        """如果可能，将字符串值转换为模式类型。"""
 
-        # Non-string values already good
+        # 非字符串值已经很好
         if not isinstance(value, str):
             return value
 
         v = value.strip()
 
-        # Boolean
+        # 布尔值
         if expected_type == "boolean":
             if v.lower() in ["true", "1"]:
                 return True
@@ -2254,19 +2327,19 @@ async def _webhook_impl(agent_id: str, is_test: bool):
                 return False
             raise Exception(f"Cannot convert '{value}' to boolean")
 
-        # Number
+        # 编号
         if expected_type == "number":
-            # integer
+            # 整数
             if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
                 return int(v)
 
-            # float
+            # 浮子
             try:
                 return float(v)
             except Exception:
                 raise Exception(f"Cannot convert '{value}' to number")
 
-        # Object
+        # 对象
         if expected_type == "object":
             try:
                 parsed = json.loads(v)
@@ -2277,7 +2350,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             except Exception:
                 raise Exception(f"Cannot convert '{value}' to object")
 
-        # Array <T>
+        # 数组 <T>
         if expected_type.startswith("array"):
             try:
                 parsed = json.loads(v)
@@ -2288,18 +2361,18 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             except Exception:
                 raise Exception(f"Cannot convert '{value}' to array")
 
-        # String (accept original)
+        # 字符串类型：原样接受。
         if expected_type == "string":
             return value
 
-        # File
+        # 文件类型。
         if expected_type == "file":
             return value
-        # Default: do nothing
+        # 默认：不执行任何操作
         return value
 
     def validate_type(value, t):
-        """Validate value type against schema type t."""
+        """根据架构类型 t 验证值类型。"""
         if t == "file":
             return isinstance(value, list)
 
@@ -2315,7 +2388,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
         if t == "object":
             return isinstance(value, dict)
 
-        # array<string> / array<number> / array<object>
+        # 数组<字符串> / 数组<数字> / 数组<对象>
         if t.startswith("array"):
             if not isinstance(value, list):
                 return False
@@ -2323,7 +2396,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
             if "<" in t and ">" in t:
                 inner = t[t.find("<") + 1 : t.find(">")]
 
-                # Check each element type
+                # 检查各个元件类型
                 for item in value:
                     if not validate_type(item, inner):
                         return False
@@ -2335,7 +2408,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
     parsed = await parse_webhook_request(webhook_cfg.get("content_types"))
     SCHEMA = webhook_cfg.get("schema", {"query": {}, "headers": {}, "body": {}})
 
-    # Extract strictly by schema
+    # 严格按模式提取
     try:
         query_clean = extract_by_schema(parsed["query"], SCHEMA.get("query", {}), name="query")
         header_clean = extract_by_schema(parsed["headers"], SCHEMA.get("headers", {}), name="headers")
@@ -2412,7 +2485,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
                 UserCanvasService.update_by_id(cvs.user_id, cvs.to_dict())
 
             except Exception as e:
-                logging.exception("Webhook background run failed")
+                logging.exception("Webhook后台运行失败")
                 if is_test:
                     try:
                         append_webhook_trace(
@@ -2434,7 +2507,7 @@ async def _webhook_impl(agent_id: str, is_test: bool):
                             },
                         )
                     except Exception:
-                        logging.exception("Failed to append webhook trace")
+                        logging.exception("无法附加 webhook 跟踪")
 
         task = asyncio.create_task(background_run())
         if isinstance(task, asyncio.Task):
@@ -2656,7 +2729,7 @@ async def _stream_agent_attachment(tenant_id, attachment_id, *, inline: bool):
 @login_required
 @add_tenant_id_to_kwargs
 async def preview_attachment(tenant_id=None, attachment_id=None):
-    """Stream an agent-generated attachment for inline preview in MCP clients."""
+    """流式传输代理生成的附件，以便在 MCP 客户端中进行内联预览。"""
     try:
         return await _stream_agent_attachment(tenant_id, attachment_id, inline=True)
     except Exception as e:
@@ -2667,7 +2740,7 @@ async def preview_attachment(tenant_id=None, attachment_id=None):
 @login_required(auth_types=[AUTH_JWT, AUTH_API, AUTH_BETA])
 @add_tenant_id_to_kwargs
 async def download_attachment(tenant_id=None, attachment_id=None):
-    """Stream an agent-generated attachment as a download."""
+    """将代理生成的附件作为下载进行流式传输。"""
     try:
         if request.args.get("disposition", "").lower() == "inline":
             return await _stream_agent_attachment(tenant_id, attachment_id, inline=True)

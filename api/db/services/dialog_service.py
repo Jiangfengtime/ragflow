@@ -64,14 +64,12 @@ def _chunk_kb_id_for_doc(row_dict, kb_ids, doc_id):
 
 
 async def _hydrate_chunk_vectors(retriever, chunks, tenant_ids, kb_ids):
-    """
-    Citation prep: on the ES backend the main retrieval call deliberately
-    skips fetching the chunk embedding. insert_citations needs it, so we
-    pull the vectors for just the candidate chunks right before computing
-    answer-vs-chunk similarity. Chunks without an ES chunk_id (e.g. web
-    search results) keep whatever placeholder they were given. Other
-    backends still carry vectors in the chunk, so we skip the round-trip.
-    """
+    """引文准备：在 ES 后端故意进行主检索调用
+    跳过获取块嵌入。 insert_citations需要它，所以我们
+    在计算之前仅提取候选块的向量
+    答案与块的相似性。没有 ES chunk_id 的块 (e.g.web
+    搜索结果）保留给定的任何占位符。其他
+    后端仍然在块中携带向量，因此我们跳过往返。"""
     if settings.DOC_ENGINE_INFINITY or settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_SERENEDB:
         return
     if not chunks:
@@ -84,8 +82,8 @@ async def _hydrate_chunk_vectors(retriever, chunks, tenant_ids, kb_ids):
             break
     if not dim:
         return
-    # Skip chunks that already have a non-zero vector (e.g. parent chunks
-    # produced by retrieval_by_children copy the child vector inline).
+    # 跳过已经具有非零向量的块（e.g。父块
+    # 由 retrieval_by_children 复制子向量内联）。
     chunk_ids = []
     for ck in chunks:
         cid = ck.get("chunk_id")
@@ -100,7 +98,7 @@ async def _hydrate_chunk_vectors(retriever, chunks, tenant_ids, kb_ids):
     try:
         vectors = await retriever.fetch_chunk_vectors(chunk_ids, tenant_ids, kb_ids, dim)
     except Exception as e:  # noqa: BLE001 - degrade gracefully on hydrate failure
-        logger.warning("fetch_chunk_vectors failed; citations will use placeholders: %s", e)
+        logger.warning("fetch_chunk_vectors 失败；引用将使用占位符：%s", e)
         return
     if not vectors:
         return
@@ -144,31 +142,29 @@ class DialogService(CommonService):
 
     @classmethod
     def save(cls, **kwargs):
-        """Save a new record to database.
+        """将新记录保存到数据库。
 
-        This method creates a new record in the database with the provided field values,
-        forcing an insert operation rather than an update.
+        此方法使用提供的字段值在数据库中创建一条新记录，
+        强制执行插入操作而不是更新操作。
 
-        Args:
-            **kwargs: Record field values as keyword arguments.
+        参数：
+            **kwargs：将字段值记录为关键字参数。
 
-        Returns:
-            Model instance: The created record object.
-        """
+        返回：
+            模型实例：创建的记录对象。"""
         sample_obj = cls.model(**kwargs).save(force_insert=True)
         return sample_obj
 
     @classmethod
     def update_many_by_id(cls, data_list):
-        """Update multiple records by their IDs.
+        """通过 IDs 更新多条记录。
 
-        This method updates multiple records in the database, identified by their IDs.
-        It automatically updates the update_time and update_date fields for each record.
+        此方法更新数据库中的多条记录，由它们的 IDs 标识。
+        它会自动更新每条记录的 update_time 和 update_date 字段。
 
-        Args:
-            data_list (list): List of dictionaries containing record data to update.
-                             Each dictionary must include an 'id' field.
-        """
+        参数：
+            data_list（列表）：包含要更新的记录数据的字典列表。
+                             每个字典必须包含 'id' 字段。"""
         with DB.atomic():
             for data in data_list:
                 data["update_time"] = current_timestamp()
@@ -523,9 +519,9 @@ def convert_last_user_msg_to_multimodal(msg: list[dict], image_data_uris: list[s
         return
 
 
-# Keys the chat-completions message schema defines. Stored messages also carry
-# RAGFlow bookkeeping such as id, created_at and doc_ids, plus the conversationId
-# the web client stamps on every turn, and strict providers reject those.
+# 聊天完成消息模式定义的键。存储的消息还携带
+# RAGFlow记账如id，created_at和doc_ids，加上conversationId
+# Web 客户端每次都会标记，并且严格的提供商会拒绝这些标记。
 LLM_MESSAGE_FIELDS = frozenset({"role", "content", "name", "tool_calls", "tool_call_id", "function_call", "refusal", "audio"})
 
 BAD_CITATION_PATTERNS = [
@@ -585,11 +581,11 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
 
 
 async def async_chat(dialog, messages, stream=True, **kwargs):
-    logging.debug("Begin async_chat")
+    logging.debug("开始 async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     session_id = kwargs.get("session_id")
     use_web_search = _should_use_web_search(dialog.prompt_config, kwargs.get("internet"))
-    logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(dialog.prompt_config), kwargs.get("internet"), use_web_search)
+    logging.debug("web_search kb=%s 配置=%s 互联网=%r 启用=%s", bool(dialog.kb_ids), has_web_search_provider(dialog.prompt_config), kwargs.get("internet"), use_web_search)
     if not dialog.kb_ids and not use_web_search:
         async for ans in async_chat_solo(dialog, messages, stream, session_id=session_id):
             yield ans
@@ -636,7 +632,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                 trace_id = langfuse_tracer.create_trace_id()
                 trace_context = {"trace_id": trace_id}
         except Exception:
-            # Skip langfuse tracing if connection fails
+            # 如果连接失败则跳过 langfuse 跟踪
             pass
 
     check_langfuse_tracer_ts = timer()
@@ -649,7 +645,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     retriever = settings.retriever
     questions = [m["content"] for m in messages if m["role"] == "user"][-3:]
 
-    # Get scoped_doc_ids
+    # 获取 scoped_doc_ids
     scoped_doc_ids = None
     if "doc_ids" in kwargs:
         scoped_doc_ids = [doc_id for doc_id in kwargs["doc_ids"].split(",") if doc_id]
@@ -666,7 +662,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
         )
 
-    # Get chat attachments
+    # 获取聊天附件
     text_attachments_content, image_attachments, image_files = get_files_content(messages[-1], llm_model_config["model_type"])
 
     prompt_config = dialog.prompt_config
@@ -674,20 +670,20 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     include_reference_metadata, metadata_fields = _resolve_reference_metadata(prompt_config, request_payload=kwargs)
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
     logging.debug(f"field_map retrieved: {field_map}")
-    # try to use sql if field mapping is good to go
+    # 如果字段映射可以的话尝试使用sql
     if field_map:
-        # Derive the doc-store tenant/namespace from the referenced dataset's own
-        # owner, not from dialog.tenant_id: a team-shared dataset may be owned by a
-        # different tenant than the one who created this chat.
+        # 从引用的数据集自己导出文档存储 tenant/namespace
+        # 所有者，不是来自 dialog.tenant_id：团队共享数据集可能由
+        # 与创建此聊天的租户不同。
         sql_kbs = [kb for kb in kbs if kb.parser_config and kb.parser_config.get("field_map")]
         sql_tenant_ids = {kb.tenant_id for kb in sql_kbs}
         if len(sql_tenant_ids) > 1:
-            # use_sql queries a single tenant's doc-store index per call, and
-            # re-running it once per tenant is too slow to do inline (each call
-            # round-trips an LLM to generate SQL). Skip SQL retrieval rather than
-            # silently querying only one tenant's index and dropping the rest.
+            # use_sql 每次调用查询单个租户的文档存储索引，并且
+            # 每个租户重新运行一次太慢而无法进行内联（每次调用
+            # 往返 LLM 生成 SQL）。跳过 SQL 检索而不是
+            # 仅静默查询一个租户的索引并删除其余索引。
             logging.warning(
-                "Skipping SQL retrieval: field-map datasets span multiple tenants (%s); falling back to vector search.",
+                "跳过 SQL 检索：字段地图数据集跨越多个租户 (%s)；回到矢量搜索。",
                 sql_tenant_ids,
             )
         else:
@@ -695,23 +691,23 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             sql_kb_ids = [kb.id for kb in sql_kbs] if sql_kbs else dialog.kb_ids
             logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
             ans = await use_sql(questions[-1], field_map, sql_tenant_id, chat_mdl, prompt_config.get("quote", True), sql_kb_ids, doc_ids=scoped_doc_ids)
-            # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
+            # 对于聚合查询（COUNT、SUM 等），块可能为空，但答案仍然有效
             if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
                 if include_reference_metadata and ans.get("reference", {}).get("chunks"):
                     if len(sql_kb_ids) != 1 and any(not c.get("kb_id") for c in ans["reference"]["chunks"]):
                         logging.warning(
-                            "Skipping some _enrich_chunks_with_document_metadata results because sql_kb_ids has %d entries and use_sql returned chunks without kb_id.",
+                            "跳过一些 _enrich_chunks_with_document_metadata 结果，因为 sql_kb_ids 具有 %d 条目，而 use_sql 返回没有 kb_id 的块。",
                             len(sql_kb_ids),
                         )
                     _enrich_chunks_with_document_metadata(ans["reference"]["chunks"], metadata_fields)
                 yield ans
                 return
             else:
-                logging.debug("SQL failed or returned no results, falling back to vector search")
+                logging.debug("SQL 失败或未返回结果，退回到矢量搜索\n尽管设置了 kb_ids，但")
 
     param_keys = [p["key"] for p in prompt_config.get("parameters", [])]
     if dialog.kb_ids and "knowledge" not in param_keys and "{knowledge}" in prompt_config.get("system", ""):
-        logging.warning("prompt_config['parameters'] is missing 'knowledge' entry despite kb_ids being set; auto-fixing.")
+        logging.warning("prompt_config['parameters'] 仍缺少 'knowledge' 条目；自动修复。")
         prompt_config.setdefault("parameters", []).append({"key": "knowledge", "optional": False})
         param_keys.append("knowledge")
     logging.debug(f"scoped_doc_ids={scoped_doc_ids}, param_keys={param_keys}, embd_mdl={embd_mdl}")
@@ -743,11 +739,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     knowledges = []
 
     if "knowledge" in param_keys:
-        logging.debug("Proceeding with retrieval")
+        logging.debug("继续检索")
         tenant_ids = list(set([kb.tenant_id for kb in kbs]))
         knowledges = []
-        # replaced by extension of reasoning: 0, 1, 2
-        if False:  # prompt_config.get("reasoning", False) or kwargs.get("reasoning"):
+        # 替换为推理扩展：0, 1, 2
+        if False:  # prompt_config.get（"reasoning"，False）或kwargs.get（"reasoning"）：
             reasoner = DeepResearcher(
                 chat_mdl,
                 prompt_config,
@@ -823,7 +819,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
     if include_reference_metadata:
         logging.debug(
-            "reference_metadata enrichment enabled for async_chat: chunk_count=%d metadata_fields=%s",
+            "reference_metadata 为 async_chat 启用富集：chunk_count=%d metadata_fields=%s",
             len(kbinfos.get("chunks", [])),
             metadata_fields,
         )
@@ -833,21 +829,32 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
 
     retrieval_ts = timer()
+    logging.info(
+        "RAG上下文已准备完成 租户ID=%s 对话应用ID=%s 会话ID=%s 知识库数=%d 召回总数=%d 切片数量=%d 知识片段数=%d 检索耗时毫秒=%.1f",
+        dialog.tenant_id,
+        getattr(dialog, "id", "default"),
+        session_id or "-",
+        len(dialog.kb_ids or []),
+        kbinfos.get("total", 0),
+        len(kbinfos.get("chunks", [])),
+        len(knowledges),
+        (retrieval_ts - refine_question_ts) * 1000,
+    )
     if not knowledges and prompt_config.get("empty_response"):
         empty_res = prompt_config["empty_response"]
-        logging.debug("async_chat empty_response path: empty_res=%r tts_mdl=%r", empty_res, tts_mdl)
-        # HTML-escape for frontend display so DOMPurify does not strip
-        # unknown tags (e.g. <abc> → &lt;abc&gt;), which would otherwise
-        # leave the content blank and stall the UI on "Searching…".
-        # The raw value is still used for TTS (which has its own tag-
-        # stripping in clean_tts_text).
+        logging.debug("async_chat empty_response 路径：empty_res=%r tts_mdl=%r", empty_res, tts_mdl)
+        # HTML-前端显示转义，因此 DOMPurify 不会剥离
+        # 未知标签 (e.g.<abc> → <abc>)，否则会
+        # 将内容留空并在 "Searching…" 上停止 UI。
+        # TTS 仍使用原始值（它有自己的标签-
+        # 剥离于 clean_tts_text)。
         escaped_answer = html.escape(empty_res)
         yield {"answer": escaped_answer, "reference": {}, "prompt": "", "audio_binary": None, "final": False}
         yield {"answer": escaped_answer, "reference": kbinfos, "prompt": "\n\n### Query:\n%s" % " ".join(questions), "audio_binary": tts(tts_mdl, empty_res), "final": True}
         return
 
-    # Only overwrite kwargs["knowledge"] when retrieval produced something;
-    # otherwise preserve any caller-supplied value.
+    # 仅当检索产生某些内容时覆盖 kwargs["knowledge"]；
+    # 否则保留调用者提供的任何值。
     knowledge_text = "\n\n------\n\n".join(knowledges)
     if knowledge_text:
         kwargs["knowledge"] = "\n------\n" + knowledge_text
@@ -856,8 +863,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     gen_conf = dialog.llm_setting
 
     system_content = prompt_config["system"].format(**kwargs)
-    # If knowledge was retrieved but the template has no {knowledge}
-    # placeholder, auto-append it so the LLM still sees the context.
+    # 如果检索到知识但模板没有 {knowledge}
+    # 占位符，自动附加它，以便 LLM 仍然可以看到上下文。
     if knowledges and "{knowledge}" not in prompt_config.get("system", ""):
         system_content += kwargs["knowledge"]
     msg = [{"role": "system", "content": system_content}]
@@ -890,8 +897,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             idx = set([])
             normalized_answer = normalize_arabic_digits(answer) or ""
             if embd_mdl and not CITATION_MARKER_PATTERN.search(normalized_answer):
-                # Main retrieval no longer ships chunk vectors back from ES.
-                # Pull them on demand for the chunks we are about to cite.
+                # 主检索不再从 ES 发回块向量。
+                # 根据我们将要引用的块按需拉取它们。
                 await _hydrate_chunk_vectors(retriever, kbinfos.get("chunks", []), tenant_ids, dialog.kb_ids)
                 answer, idx = retriever.insert_citations(
                     answer,
@@ -949,7 +956,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             f"  - Token speed: {int(tk_num / (generate_result_time_cost / 1000.0))}/s"
         )
 
-        # Add a condition check to call the end method only if langfuse_generation exists
+        # 添加条件检查，仅当 langfuse_generation 存在时调用结束方法
         if langfuse_generation is not None:
             langfuse_output = "\n" + re.sub(r"^.*?(### Query:.*)", r"\1", prompt, flags=re.DOTALL)
             langfuse_output = {"time_elapsed:": re.sub(r"\n", "  \n", langfuse_output), "created_at": time.time()}
@@ -962,6 +969,18 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                 },
             )
             langfuse_generation.end()
+
+        logging.info(
+            "RAG回答完成 租户ID=%s 对话应用ID=%s 会话ID=%s 引用文档数=%d 生成令牌数=%d 总耗时毫秒=%.1f 检索耗时毫秒=%.1f 生成耗时毫秒=%.1f",
+            dialog.tenant_id,
+            getattr(dialog, "id", "default"),
+            session_id or "-",
+            len(refs.get("doc_aggs", [])) if isinstance(refs, dict) else 0,
+            tk_num,
+            total_time_cost,
+            retrieval_time_cost,
+            generate_result_time_cost,
+        )
 
         return {"answer": think + answer, "reference": refs, "prompt": re.sub(r"\n", "  \n", prompt), "created_at": time.time()}
 
@@ -980,7 +999,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             else:
                 langfuse_generation = langfuse_tracer.start_observation(**observation_kwargs)
         except Exception as e:  # noqa: BLE001 - tracing must not break chat flow
-            logger.warning("Langfuse start_observation failed; continuing without tracing: %s", e)
+            logger.warning("Langfuse start_observation 失败；继续而不跟踪：%s", e)
             langfuse_tracer = None
             langfuse_generation = None
 
@@ -1019,29 +1038,28 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
 
 async def use_sql(question, field_map, tenant_id, chat_mdl, quota=True, kb_ids=None, doc_ids=None):
-    """Answer a natural-language question by generating and executing SQL against the document index.
+    """通过针对文档索引生成并执行 SQL 来回答自然语言问题。
 
-    Detects the active document engine (Infinity, OceanBase, or Elasticsearch), asks the
-    chat model to produce the appropriate SQL, injects a validated kb_id filter, executes
-    the query, and returns formatted results with optional source citations.
+    检测活动文档引擎（Infinity、OceanBase 或 Elasticsearch），询问
+    聊天模型生成适当的 SQL，注入经过验证的 kb_id 过滤器，执行
+    查询，并返回带有可选源引用的格式化结果。
 
-    Args:
-        question: Natural-language question from the user.
-        field_map: Mapping of field names to types describing the indexed document schema.
-        tenant_id: Tenant identifier used to derive the target index/table name.
-        chat_mdl: LLM bundle used to generate SQL from the question.
-        quota: Whether to enforce token-quota checks (default True).
-        kb_ids: Optional list of knowledge-base UUIDs to restrict the query scope.
-        doc_ids: Optional list of document UUIDs to restrict the query scope.
+    参数：
+        问题：用户提出的自然语言问题。
+        field_map：将字段名称映射到描述索引文档模式的类型。
+        tenant_id：用于派生目标 index/table 名称的租户标识符。
+        chat_mdl：LLM 捆绑包用于从问题生成 SQL。
+        配额：是否强制执行令牌配额检查（默认 True）。
+        kb_ids：可选的知识库列表UUIDs，用于限制查询范围。
+        doc_ids：文档UUIDs的可选列表，用于限制查询范围。
 
-    Returns:
-        A dict with keys ``answer`` (formatted response string), ``reference``
+    返回：
+        带键的字典``answer`` (formatted response string), ``reference``
         (dict of supporting document chunks and doc_aggs), and ``prompt``
-        (the system prompt used), or ``None`` if SQL generation or execution fails.
-    """
+        (the system prompt used), or ``None``如果SQL生成或执行失败。"""
     logging.debug(f"use_sql: Question: {question}")
 
-    # Determine which document engine we're using
+    # 确定我们正在使用哪个文档引擎
     if settings.DOC_ENGINE_INFINITY:
         doc_engine = "infinity"
     elif settings.DOC_ENGINE_OCEANBASE:
@@ -1057,7 +1075,7 @@ async def use_sql(question, field_map, tenant_id, chat_mdl, quota=True, kb_ids=N
         try:
             uuid.UUID(str(value))
         except (ValueError, AttributeError, TypeError):
-            logger.warning("SQL injection guard rejected invalid %s value (length=%d)", label, len(str(value)))
+            logger.warning("SQL 注入防护拒绝无效的 %s 值（长度=%d）", label, len(str(value)))
             raise ValueError(f"Invalid {label} format: {value!r}")
 
     if isinstance(doc_ids, str):
@@ -1065,17 +1083,17 @@ async def use_sql(question, field_map, tenant_id, chat_mdl, quota=True, kb_ids=N
     else:
         doc_ids = [doc_id for doc_id in doc_ids or [] if doc_id]
 
-    # Construct the full table name
-    # For Elasticsearch: ragflow_{tenant_id} (kb_id is in WHERE clause)
-    # For Infinity: ragflow_{tenant_id}_{kb_id} (each KB has its own table)
+    # 构造全表名
+    # 对于 Elasticsearch：ragflow_{tenant_id}（kb_id 位于 WHERE 子句中）
+    # 对于 Infinity：ragflow_{tenant_id}_{kb_id} （每个 KB 有自己的表）
     base_table = index_name(tenant_id)
     if doc_engine == "infinity" and kb_ids and len(kb_ids) == 1:
-        # Infinity: append kb_id to table name — validate before interpolating
+        # Infinity：将 kb_id 附加到表名称 - 插值前验证
         _assert_valid_uuid(kb_ids[0], "kb_id")
         table_name = f"{base_table}_{kb_ids[0]}"
         logging.debug(f"use_sql: Using Infinity table name: {table_name}")
     else:
-        # Elasticsearch/OpenSearch: use base index name
+        # Elasticsearch/OpenSearch：使用基本索引名称
         table_name = base_table
         logging.debug(f"use_sql: Using ES/OS table name: {table_name}")
 
@@ -1088,39 +1106,37 @@ async def use_sql(question, field_map, tenant_id, chat_mdl, quota=True, kb_ids=N
         gaussdb_validator = gaussdb_text_to_sql.build_validator(table_name, kb_ids, field_map)
 
     def has_source_columns(columns):
-        """Return True if the result set contains the columns needed to build source citations."""
+        """如果结果集包含构建源引文所需的列，则返回 True。"""
         normalized_names = {str(col.get("name", "")).lower() for col in columns}
         return "doc_id" in normalized_names and bool({"docnm_kwd", "docnm"} & normalized_names)
 
     def is_aggregate_sql(sql_text):
-        """Return True if *sql_text* contains an aggregate function (COUNT, SUM, AVG, MAX, MIN, DISTINCT)."""
+        """如果 *sql_text* 包含聚合函数（COUNT、SUM、AVG、MAX、 MIN，DISTINCT）。"""
         if doc_engine == "gaussdb":
             return gaussdb_text_to_sql.is_aggregate_sql(sql_text)
         return bool(re.search(r"(count|sum|avg|max|min|distinct)\s*\(", (sql_text or "").lower()))
 
     def normalize_sql(sql):
-        """Strip LLM artefacts from *sql* and return a clean, executable SQL string.
+        """从 *sql* 中剥离 LLM 工件并返回干净的可执行 SQL 字符串。
 
-        Removes ``<think>`` reasoning blocks, Chinese reasoning markers, markdown
-        code fences, and trailing semicolons that some engines reject.
-        """
+        删除“`<think>`”推理块、中文推理标记、markdown
+        代码围栏和某些引擎拒绝的尾随分号。"""
         logging.debug(f"use_sql: Raw SQL from LLM: {repr(sql[:500])}")
-        # Remove think blocks if present (format: </think>...)
+        # 删除思考块（如果存在）（格式：</think>...）
         sql = re.sub(r"</think>\n.*?\n\s*", "", sql, flags=re.DOTALL)
         sql = re.sub(r"思考\n.*?\n", "", sql, flags=re.DOTALL)
-        # Remove markdown code blocks (```sql ... ```)
+        # 删除 markdown 代码块 (```sql ... ```)
         sql = re.sub(r"```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
         sql = re.sub(r"```\s*$", "", sql, flags=re.IGNORECASE)
-        # Remove trailing semicolon that ES SQL parser doesn't like
+        # 删除 ES SQL 解析器不喜欢的尾随分号
         return sql.rstrip().rstrip(";").strip()
 
     def add_kb_filter(sql):
-        """Inject validated scope filters into *sql*.
+        """将经过验证的范围过滤器注入到 *sql* 中。
 
-        Infinity encodes single-KB scope in the table name and the GaussDB
-        validator injects its KB boundary, so only document scope is injected
-        for those engines. All ids are validated before interpolation.
-        """
+        Infinity 在表名和 GaussDB 中编码单个 KB 范围
+        验证器注入其 KB 边界，因此仅注入文档范围
+        对于那些引擎。所有 id 在插值之前都会经过验证。"""
         scope_filters = []
         sql_lower = sql.lower()
         if doc_engine not in ("infinity", "gaussdb") and kb_ids and "kb_id =" not in sql_lower and "kb_id=" not in sql_lower:
@@ -1151,15 +1167,15 @@ async def use_sql(question, field_map, tenant_id, chat_mdl, quota=True, kb_ids=N
         return sql
 
     def is_row_count_question(q: str) -> bool:
-        """Return True if *q* is asking for a total row count of a dataset or table."""
+        """如果 *q* 要求数据集或表的总行数，则返回 True。"""
         q = (q or "").lower()
         if not re.search(r"\bhow many rows\b|\bnumber of rows\b|\brow count\b", q):
             return False
         return bool(re.search(r"\bdataset\b|\btable\b|\bspreadsheet\b|\bexcel\b", q))
 
-    # Generate engine-specific SQL prompts
+    # 生成引擎特定的 SQL 提示
     if doc_engine == "infinity":
-        # Build Infinity prompts with JSON extraction context
+        # 构建 Infinity 提示 JSON 提取上下文
         json_field_names = list(field_map.keys())
         row_count_override = f"SELECT COUNT(*) AS rows FROM {table_name}" if is_row_count_question(question) else None
         sys_prompt = """You are a Database Administrator. Write SQL for a table with JSON 'chunk_data' column.
@@ -1190,7 +1206,7 @@ Write SQL using json_extract_string() with exact field names. Include doc_id, do
             table_name, ", ".join(json_field_names), "\n".join([f"  - {field}" for field in json_field_names]), question
         )
     elif doc_engine == "oceanbase":
-        # Build OceanBase prompts with JSON extraction context
+        # 构建 OceanBase 提示 JSON 提取上下文
         json_field_names = list(field_map.keys())
         row_count_override = f"SELECT COUNT(*) AS rows FROM {table_name}" if is_row_count_question(question) else None
         sys_prompt = """You are a Database Administrator. Write SQL for a table with JSON 'chunk_data' column.
@@ -1223,7 +1239,7 @@ Write SQL using json_extract_string() with exact field names. Include doc_id, do
         sys_prompt = gaussdb_text_to_sql.build_sql_prompt(table_name, field_map, question)
         user_prompt = gaussdb_text_to_sql.build_user_prompt(table_name, field_map, question)
     else:
-        # Build ES/OS prompts with direct field access
+        # Build ES/OS 提示可直接现场访问
         row_count_override = None
         sys_prompt = """You are a Database Administrator. Write SQL queries.
 
@@ -1259,13 +1275,13 @@ Write SQL using exact field names above. Include doc_id, docnm_kwd for data quer
         logging.debug(f"use_sql: Executing SQL retrieval (attempt {tried_times})")
         tbl = settings.retriever.sql_retrieval(sql, format="json")
         if tbl is None:
-            logging.debug("use_sql: SQL retrieval failed (returned None)")
+            logging.debug("use_sql：SQL检索失败（返回无）")
             if doc_engine == "gaussdb":
                 raise RuntimeError("SQL execution returned no result")
             return None, sql
         row_count = len(tbl.get("rows", []))
         if row_count == 0:
-            logging.debug("use_sql: SQL execution succeeded but returned 0 rows")
+            logging.debug("use_sql：SQL执行成功但返回0行")
         else:
             logging.debug(f"use_sql: SQL retrieval completed, got {row_count} rows")
         return tbl, sql
@@ -1314,11 +1330,11 @@ Return ONLY SQL.""".format(table_name, "\n".join([f"  - {k} ({v})" for k, v in f
         logging.debug(f"use_sql: Retrieved {len(tbl.get('rows', []))} rows, columns: {[c['name'] for c in tbl.get('columns', [])]}")
     except Exception as e:
         logging.warning(f"use_sql: Initial SQL execution FAILED with error: {e}")
-        # Build retry prompt with error information
+        # 构建重试提示，包含错误信息
         if doc_engine == "gaussdb":
             user_prompt = gaussdb_text_to_sql.build_retry_prompt(table_name, field_map, question, e)
         elif doc_engine in ("infinity", "oceanbase"):
-            # Build Infinity error retry prompt
+            # Build Infinity 错误重试提示
             json_field_names = list(field_map.keys())
             user_prompt = """
 Table name: {};
@@ -1335,7 +1351,7 @@ The SQL error you provided last time is as follows:
 Please correct the error and write SQL again using json_extract_string(chunk_data, '$.field_name') syntax with the correct field names. Only SQL, no explanations.
 """.format(table_name, "\n".join([f"  - {field}" for field in json_field_names]), question, e)
         else:
-            # Build ES/OS error retry prompt
+            # Build ES/OS 错误重试提示
             user_prompt = """
         Table name: {};
         Table of database fields are as follows (use the field names directly in SQL):
@@ -1356,7 +1372,7 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
             logging.debug(f"use_sql: Retry SQL execution SUCCESS. SQL: {sql}")
             logging.debug(f"use_sql: Retrieved {len(tbl.get('rows', []))} rows on retry")
         except Exception:
-            logging.error("use_sql: Retry SQL execution also FAILED, returning None")
+            logging.error("use_sql：重试SQL执行也是FAILED，返回None")
             return
 
     if len(tbl["rows"]) == 0:
@@ -1389,58 +1405,58 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
     logging.debug(f"use_sql: column_idx={column_idx}")
     logging.debug(f"use_sql: field_map={field_map}")
 
-    # Helper function to map column names to display names
+    # 帮助函数将列名称映射到显示名称
     def map_column_name(col_name):
         if col_name.lower() == "count(star)":
             return "COUNT(*)"
 
-        # First, try to extract AS alias from any expression (aggregate functions, json_extract_string, etc.)
-        # Pattern: anything AS alias_name
+        # 首先，尝试从任何表达式（聚合函数、json_extract_string 等）中提取 AS 别名
+        # 模式：任何 AS alias_name
         as_match = re.search(r"\s+AS\s+([^\s,)]+)", col_name, re.IGNORECASE)
         if as_match:
             alias = as_match.group(1).strip("\"'")
 
-            # Use the alias for display name lookup
+            # 使用别名进行显示名称查找
             if alias in field_map:
                 display = field_map[alias]
                 return re.sub(r"(/.*|（[^（）]+）)", "", display)
-            # If alias not in field_map, try to match case-insensitively
+            # 如果别名不在 field_map 中，则尝试不区分大小写匹配
             for field_key, display_value in field_map.items():
                 if field_key.lower() == alias.lower():
                     return re.sub(r"(/.*|（[^（）]+）)", "", display_value)
-            # Return alias as-is if no mapping found
+            # 如果未找到映射，则按原样返回别名
             return alias
 
-        # Try direct mapping first (for simple column names)
+        # 首先尝试直接映射（对于简单的列名称）
         if col_name in field_map:
             display = field_map[col_name]
-            # Clean up any suffix patterns
+            # 清理任何后缀模式
             return re.sub(r"(/.*|（[^（）]+）)", "", display)
 
-        # Try case-insensitive match for simple column names
+        # 尝试对简单列名称进行不区分大小写的匹配
         col_lower = col_name.lower()
         for field_key, display_value in field_map.items():
             if field_key.lower() == col_lower:
                 return re.sub(r"(/.*|（[^（）]+）)", "", display_value)
 
-        # For aggregate expressions or complex expressions without AS alias,
-        # try to replace field names with display names
+        # 对于没有 AS 别名的聚合表达式或复杂表达式，
+        # 尝试用显示名称替换字段名称
         result = col_name
         for field_name, display_name in field_map.items():
-            # Replace field_name with display_name in the expression
+            # 将表达式中的 field_name 替换为 display_name
             result = result.replace(field_name, display_name)
 
-        # Clean up any suffix patterns
+        # 清理任何后缀模式
         result = re.sub(r"(/.*|（[^（）]+）)", "", result)
         return result
 
-    # compose Markdown table
+    # 撰写Markdown表格
     columns = "|" + "|".join([map_column_name(tbl["columns"][i]["name"]) for i in column_idx]) + ("|Source|" if docid_idx and doc_name_idx else "|")
 
     line = "|" + "|".join(["------" for _ in range(len(column_idx))]) + ("|------|" if docid_idx and doc_name_idx else "")
 
-    # Build rows ensuring column names match values - create a dict for each row
-    # keyed by column name to handle any SQL column order
+    # 构建行确保列名与值匹配 - 为每行创建一个字典
+    # 按列名称键入以处理任何 SQL 列顺序
     rows = []
     for row_idx, r in enumerate(tbl["rows"]):
         row_dict = {tbl["columns"][i]["name"]: r[i] for i in range(len(tbl["columns"])) if i < len(r)}
@@ -1451,7 +1467,7 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
             col_name = tbl["columns"][col_idx]["name"]
             value = row_dict.get(col_name, " ")
             row_values.append(remove_redundant_spaces(str(value)).replace("None", " "))
-        # Add Source column with citation marker if Source column exists
+        # 如果源列存在，则添加带有引用标记的源列
         if docid_idx and doc_name_idx:
             row_values.append(f" ##{row_idx}$$")
         row_str = "|" + "|".join(row_values) + "|"
@@ -1465,10 +1481,10 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
 
     if not docid_idx or not doc_name_idx:
         logging.warning(f"use_sql: SQL missing required doc_id or docnm_kwd field. docid_idx={docid_idx}, doc_name_idx={doc_name_idx}. SQL: {sql}")
-        # For aggregate queries (COUNT, SUM, AVG, MAX, MIN, DISTINCT), fetch doc_id, docnm_kwd separately
-        # to provide source chunks, but keep the original table format answer
+        # 用于聚合查询（COUNT、SUM、AVG、MAX、MIN、 DISTINCT)，分别取doc_id、docnm_kwd
+        # 提供源块，但保留原始表格式答案
         if is_aggregate_sql(sql):
-            # Keep original table format as answer
+            # 保留原始表格格式作为答案
             answer = "\n".join([columns, line, rows])
 
             if doc_engine == "gaussdb":
@@ -1488,24 +1504,24 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
                     logging.warning(f"use_sql: Failed to fetch chunks: {e}")
                 return {"answer": answer, "reference": {"chunks": [], "doc_aggs": []}, "prompt": sys_prompt}
 
-            # Now fetch doc_id, docnm_kwd to provide source chunks
-            # Extract WHERE clause from the original SQL
+            # 现在获取 doc_id、docnm_kwd 以提供源块
+            # 从原始 SQL 中提取 WHERE 子句
             where_match = re.search(r"\bwhere\b(.+?)(?:\bgroup by\b|\border by\b|\blimit\b|$)", sql, re.IGNORECASE)
             if where_match:
                 where_clause = where_match.group(1).strip()
-                # Build a query to get source fields with the same WHERE clause.
-                # Single-KB queries can derive kb_id from the dialog, while multi-KB
-                # ES/OS queries need the row value for metadata enrichment.
+                # 构建查询以获取具有相同 WHERE 子句的源字段。
+                # 单KB查询可以从对话框中导出kb_id，而多KB
+                # ES/OS 查询需要行值来丰富元数据。
                 chunks_kb_column = ", kb_id" if not (kb_ids and len(kb_ids) == 1) else ""
                 chunks_sql = f"select doc_id, {expected_doc_name_column}{chunks_kb_column} from {table_name} where {where_clause}"
-                # Add LIMIT to avoid fetching too many chunks
+                # 添加 LIMIT 以避免获取太多块
                 if "limit" not in chunks_sql.lower():
                     chunks_sql += " limit 20"
                 logging.debug(f"use_sql: Fetching chunks with SQL: {chunks_sql}")
                 try:
                     chunks_tbl = settings.retriever.sql_retrieval(chunks_sql, format="json")
                     if chunks_tbl.get("rows") and len(chunks_tbl["rows"]) > 0:
-                        # Build chunks reference - use case-insensitive matching
+                        # 构建块参考 - 使用不区分大小写的匹配
                         chunks_did_idx = next((i for i, c in enumerate(chunks_tbl["columns"]) if c["name"].lower() == "doc_id"), None)
                         chunks_dn_idx = next((i for i, c in enumerate(chunks_tbl["columns"]) if c["name"].lower() in ["docnm_kwd", "docnm"]), None)
                         chunks_kb_idx = next((i for i, c in enumerate(chunks_tbl["columns"]) if c["name"].lower() in ["kb_id", "kb_id_kwd"]), None)
@@ -1520,7 +1536,7 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
                                 elif chunks_kb_idx is not None:
                                     chunk["kb_id"] = r[chunks_kb_idx]
                                 chunks.append(chunk)
-                            # Build doc_aggs
+                            # 构建 doc_aggs
                             doc_aggs = {}
                             for r in chunks_tbl["rows"]:
                                 doc_id = r[chunks_did_idx]
@@ -1533,9 +1549,9 @@ Please correct the error and write SQL again using json_extract_string(chunk_dat
                             return {"answer": answer, "reference": {"chunks": chunks, "doc_aggs": doc_aggs_list}, "prompt": sys_prompt}
                 except Exception as e:
                     logging.warning(f"use_sql: Failed to fetch chunks: {e}")
-            # Fallback: return answer without chunks
+            # 后备：返回没有块的答案
             return {"answer": answer, "reference": {"chunks": [], "doc_aggs": []}, "prompt": sys_prompt}
-        # Fallback to table format for other cases
+        # 其他情况回退到表格式
         return {"answer": "\n".join([columns, line, rows]), "reference": {"chunks": [], "doc_aggs": []}, "prompt": sys_prompt}
 
     docid_idx = list(docid_idx)[0]
@@ -1585,7 +1601,7 @@ def clean_tts_text(text: str) -> str:
     if not text:
         return ""
 
-    logging.debug("clean_tts_text BEFORE: %r", text)
+    logging.debug("清理语音文本之前：%r", text)
 
     text = text.encode("utf-8", "ignore").decode("utf-8", "ignore")
 
@@ -1596,8 +1612,8 @@ def clean_tts_text(text: str) -> str:
     )
     text = emoji_pattern.sub("", text)
 
-    # Strip XML/SSML/HTML-like tags so the TTS engine does not hang on
-    # unclosed or unknown markup (e.g. <abc> in empty_response).
+    # 剥离 XML/SSML/HTML 类似标签，以便 TTS 引擎不会挂起
+    # 未封闭或未知标记（e.g.<abc> in empty_response）。
     text = re.sub(r"<[^>]*>", "", text)
 
     text = re.sub(r"\s+", " ", text).strip()
@@ -1606,7 +1622,7 @@ def clean_tts_text(text: str) -> str:
     if len(text) > MAX_LEN:
         text = text[:MAX_LEN]
 
-    logging.debug("clean_tts_text AFTER: %r", text)
+    logging.debug("清理语音文本之后：%r", text)
     return text
 
 
@@ -1778,6 +1794,12 @@ async def _stream_with_think_delta(stream_iter, min_tokens: int = 16):
 
 
 async def async_ask(question, kb_ids, tenant_id, chat_llm_name=None, search_config={}, search_id=None):
+    """搜索应用的检索摘要链路。
+
+    与 Chat 共用底层 Retriever，但这里固定先取候选 Chunk，再用 ``ASK_SUMMARY``
+    生成摘要，并在最终事件中补齐引用。生成过程的 token 事件先流式返回，最后一个
+    ``final=True`` 事件主要携带 reference。
+    """
     doc_ids = search_config.get("doc_ids", [])
     rerank_mdl = None
     kb_ids = search_config.get("kb_ids", kb_ids)
@@ -1827,7 +1849,7 @@ async def async_ask(question, kb_ids, tenant_id, chat_llm_name=None, search_conf
     except TypeError:
         full_text_weight = None
     logger.debug(
-        "Search async_ask retrieval weight: search_id=%s tenant_id=%s kb_count=%s vector_similarity_weight=%s full_text_weight=%s",
+        "Search async_ask 检索重量：搜索应用ID=%s 租户ID=%s kb_count=%s vector_similarity_weight=%s full_text_weight=%s",
         search_id,
         tenant_id,
         len(kb_ids),
@@ -1852,9 +1874,18 @@ async def async_ask(question, kb_ids, tenant_id, chat_llm_name=None, search_conf
         trace_id=search_id,
         rerank_candidates_count=search_config.get("rerank_candidates_count", 100),
     )
+    logger.info(
+        "搜索应用召回完成 搜索应用ID=%s 租户ID=%s 知识库ID列表=%s 命中总数=%d 返回切片数=%d 是否重排=%s",
+        search_id or "-",
+        tenant_id,
+        kb_ids,
+        kbinfos.get("total", 0),
+        len(kbinfos.get("chunks", [])),
+        bool(rerank_mdl),
+    )
     if include_reference_metadata:
         logging.debug(
-            "reference_metadata enrichment enabled for async_ask: chunk_count=%d metadata_fields=%s",
+            "reference_metadata 为 async_ask 启用富集：chunk_count=%d metadata_fields=%s",
             len(kbinfos.get("chunks", [])),
             metadata_fields,
         )
@@ -1867,8 +1898,8 @@ async def async_ask(question, kb_ids, tenant_id, chat_llm_name=None, search_conf
 
     async def decorate_answer(answer):
         nonlocal knowledges, kbinfos, sys_prompt
-        # Main retrieval no longer ships chunk vectors back from ES. Pull
-        # them on demand for the chunks we are about to cite.
+        # 主检索不再从 ES 发回块向量。拉动
+        # 他们按需提供我们即将引用的块。
         await _hydrate_chunk_vectors(retriever, kbinfos.get("chunks", []), tenant_ids, kb_ids)
         answer, idx = retriever.insert_citations(answer, [ck["content_ltks"] for ck in kbinfos["chunks"]], [ck["vector"] for ck in kbinfos["chunks"]], embd_mdl, tkweight=0.7, vtweight=0.3)
         idx = set([kbinfos["chunks"][int(i)]["doc_id"] for i in idx])
@@ -1884,6 +1915,12 @@ async def async_ask(question, kb_ids, tenant_id, chat_llm_name=None, search_conf
         if answer.lower().find("invalid key") >= 0 or answer.lower().find("invalid api") >= 0:
             answer += " Please set LLM API-Key in 'User Setting -> Model Providers -> API-Key'"
         refs["chunks"] = chunks_format(refs)
+        logger.info(
+            "搜索应用引用已构建 搜索应用ID=%s 引用文档数=%d 引用切片数=%d",
+            search_id or "-",
+            len(idx),
+            len(refs.get("chunks", [])),
+        )
         return {"answer": answer, "reference": refs}
 
     gen_conf = resolve_llm_setting(search_config.get("llm_setting"))
@@ -1960,13 +1997,12 @@ async def gen_mindmap(question, kb_ids, tenant_id, search_config={}):
 
 
 def _render_reasoning_system_prompt(dialog, prompt_config: dict, kwargs: dict) -> str:
-    """Render the dialog-level system prompt for the reasoning agent path.
+    """渲染推理代理路径的对话级系统提示。
 
-    Mirrors the substitutions ``async_chat`` performs for the non-reasoning path
+    镜像替换 ``async_chat`` performs for the non-reasoning path
     so that configured system prompts are honored when reasoning is enabled.
-    The ``{knowledge}`` placeholder is defaulted to an empty string because the
-    agentic graph supplies retrieved evidence through its own evidence block.
-    """
+    The ``{knowledge}`` 占位符默认为空字符串，因为
+    代理图通过其自己的证据块提供检索到的证据。"""
     system = prompt_config.get("system", "")
     if not system:
         return ""
@@ -1993,13 +2029,31 @@ def _render_reasoning_system_prompt(dialog, prompt_config: dict, kwargs: dict) -
 
 
 async def rag_agent(dialog, messages, stream=True, **kwargs):
+    """按 Dialog.reasoning 在普通 RAG 与智能体 RAG 两条回答链路之间分流。
+
+    ``reasoning=0`` 进入 ``async_chat``：问题改写/混合检索/Prompt/LLM/引用；
+    其他值进入 RAGTools 驱动的推理图，模型可多轮调用检索或 Web Search 工具。
+    本函数只产出事件，Conversation 的最终持久化由 REST completion 入口负责。
+    """
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     reasoning = kwargs["reasoning"] if "reasoning" in kwargs else prompt_config.get("reasoning", 0)
+    logging.info(
+        "RAG回答已开始 租户ID=%s 对话应用ID=%s 会话ID=%s 是否流式=%s 推理模式=%s 知识库数=%d 消息数=%d",
+        dialog.tenant_id,
+        getattr(dialog, "id", "default"),
+        kwargs.get("session_id", "-"),
+        stream,
+        reasoning,
+        len(dialog.kb_ids or []),
+        len(messages),
+    )
     if not reasoning or str(reasoning).strip() == "0":
+        logging.debug("RAG回答模式 对话应用ID=%s 模式=标准", getattr(dialog, "id", "默认"))
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
         return
+    logging.debug("RAG回答模式 对话应用ID=%s 模式=智能体推理", getattr(dialog, "id", "默认"))
     kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog)
     model_type = chat_mdl.model_config["model_type"]
     factory = chat_mdl.model_config.get("llm_factory", "") if chat_mdl.model_config else ""
@@ -2010,10 +2064,10 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     if model_type == "chat" and image_attachments:
         convert_last_user_msg_to_multimodal(agent_messages, image_attachments, factory)
     use_web_search = _should_use_web_search(prompt_config, kwargs.get("internet"))
-    logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(prompt_config), kwargs.get("internet"), use_web_search)
+    logging.debug("web_search kb=%s 配置=%s 互联网=%r 启用=%s", bool(dialog.kb_ids), has_web_search_provider(prompt_config), kwargs.get("internet"), use_web_search)
     tenant_ids = list(set([kb.tenant_id for kb in kbs]))
-    # "reasoning" arrives as "1".."4" mapping to the ordered THINKING_MODES
-    # (low, medium, high, ultra); fall back to "medium" on anything else.
+    # "reasoning" 到达时为 "1".."4" 映射到有序 THINKING_MODES
+    # （低、中、高、超）；其他任何事情都可以回到 "medium" 。
     from rag.advanced_rag.harness.config import THINKING_MODES
 
     _mode_labels = list(THINKING_MODES.keys())
@@ -2105,21 +2159,22 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         return {"answer": think + answer, "reference": refs, "prompt": "", "created_at": time.time()}
 
-    # The agentic-search graph composes the final cited answer itself, so we
-    # stream its tokens straight to the client instead of relaying a tool
-    # result through a second outer-LLM pass.
+    # 代理搜索图本身构成了最终引用的答案，所以我们
+    # 将其代币直接流式传输到客户端，而不是中继工具
+    # 通过第二次外部 LLM 传递得到
+    # 结果。
 
     chat_mdl.bind_tools(None, rag_tools.tools)
-    # `rag` composes the full cited answer itself, so treat it as terminal: once
-    # the model calls it, stream its result and stop — otherwise the model would
-    # have to relay the (citation-bearing) answer through another round, which
-    # small models mangle or drop, so the client receives nothing.
+    # `rag` 本身组成完整引用的答案，因此将其视为终端：一次
+    # 模型调用它，传输其结果并停止 - 否则模型将
+    # 必须通过另一轮转达（带有引文的）答案，这
+    # 小型号损坏或掉落，因此客户没有收到任何东西。
     if getattr(chat_mdl, "mdl", None) is not None:
         chat_mdl.mdl.terminal_tools = {"rag"}
     if stream:
-        # Surface the outer model's reasoning, agent progress logs, and the
-        # final-answer model's reasoning as one continuous think block. The
-        # final answer itself is emitted from the inner graph's own deltas.
+        # 展示外部模型的推理、代理进度日志以及
+        # 最终答案模型的推理作为一个连续的思考块。的
+        # 最终答案本身是从内部图自己的增量中发出的。
         from rag.advanced_rag.think_log import install_think_log_handler, set_think_log_sink, reset_think_log_sink
 
         install_think_log_handler()
@@ -2151,7 +2206,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                 async for kind, value, state in _stream_with_think_delta(stream_iter):
                     event_queue.put_nowait(("stream", kind, value, state.in_think if state is not None else False))
             except Exception:
-                logging.exception("rag_agent: agentic stream failed")
+                logging.exception("rag_agent：代理流失败")
             finally:
                 loop.call_soon_threadsafe(event_queue.put_nowait, ("stream_done",))
 
@@ -2174,9 +2229,9 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                     yield {"answer": delta, "reference": {}, "audio_binary": tts(tts_mdl, delta), "final": False}
 
         try:
-            # The outer model emits this as a synthetic <think> token while it
-            # invokes the terminal tool.  Make it part of the single progress
-            # block instead of forwarding its marker separately.
+            # 外部模型将其作为合成 <think> 令牌发出，同时它
+            # 调用终端工具。  使其成为单一进度的一部分
+            # 块而不是单独转发其标记。
             yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, "start_to_think": True}
             while True:
                 item = await event_queue.get()
@@ -2216,25 +2271,25 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                     break
                 _, kind, value, in_think = item
                 if kind != "text" or not value:
-                    # The outer model's think markers are folded into the one
-                    # block opened above; they must not create extra markers.
+                    # 外模型的思考标记被折叠到一个模型中
+                    # 区块在上面打开；他们不得创建额外的标记。
                     continue
 
-                # Forward outer-model thinking text, including any tail that
-                # arrives after the research-complete log.  The state tells us
-                # whether this is still inside the model's think section.
-                # Once that section is closed and the terminal tool has
-                # started, subsequent text is the aggregate tool result and is
-                # intentionally ignored.
+                # 正向外模型思维文本，包括任何尾部
+                # 在研究完成日志后到达。  国家告诉我们
+                # 这是否仍在模型的思考部分内。
+                # 一旦该部分关闭并且终端工具已
+                # 开始，后续文本为聚合工具结果，为
+                # 故意忽略。
                 if in_think:
                     value = re.sub(r"</?think>", "", value)
                     if value:
                         yield {"answer": value, "reference": {}, "audio_binary": None, "final": False}
                 elif not outer_tool_started:
-                    # Some providers omit explicit reasoning metadata and
-                    # emit plain text before the tool call. Keep it pending
-                    # until we know whether a tool call or a direct answer
-                    # follows, so a direct answer is not left in <think>.
+                    # 一些提供商省略了显式推理元数据并且
+                    # 在工具调用之前发出纯文本。保留待处理状态
+                    # 直到我们知道是工具调用还是直接应答
+                    # 紧随其后，因此<think>中没有留下直接答案。
                     value = re.sub(r"</?think>", "", value)
                     if value:
                         pending_outer_text.append(value)
@@ -2250,7 +2305,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logging.exception("rag_agent: drive task error")
+                logging.exception("rag_agent：驱动任务错误")
 
         answer_text = "".join(answer_deltas)
         final = await decorate_answer(answer_text)

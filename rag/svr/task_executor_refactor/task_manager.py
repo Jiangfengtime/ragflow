@@ -13,12 +13,10 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Task Manager Module.
+"""Task管理模块。
 
-Provides [`TaskManager`](rag/svr/task_executor_refactor/task_manager.py:50) as the entry point
-for executing document processing tasks, supporting both production and dry-run (comparison) modes.
-"""
+提供 [`TaskManager`](rag/svr/task_executor_refactor/task_manager.py:50) 作为入口点
+用于执行文档处理任务，支持生产和试运行（比较）模式。"""
 
 import logging
 from typing import Any, Optional
@@ -41,53 +39,51 @@ from rag.svr.task_executor_refactor.write_operation_interceptor import (
 
 
 class TaskManager:
-    """Entry point for executing document processing tasks.
+    """执行文档处理任务的入口点。
 
-    This class provides methods for:
-    - Production task execution (run_refactored_task)
-    - Dry-run task execution with comparison (dry_run_task)
+    此类提供了以下方法：
+    - 生产任务执行（run_refactored_task）
+    - 试运行任务执行并进行比较（dry_run_task）
 
-    Usage:
-        manager = TaskManager()
-        await manager.run_refactored_task(task, chat_limiter, ...)
-        # or
-        await manager.dry_run_task(task, recording_ctx1, ...)
-    """
+    用途：
+        经理 = TaskManager()
+        等待 manager.run_refactored_task(任务, chat_limiter, ...)
+        # 或
+        等待 manager.dry_run_task(任务, recording_ctx1, ...)"""
 
     @classmethod
     async def run_refactored_task(
         cls,
         task: dict,
-        chat_limiter: Any, # 限制同时调用 Chat/LLM 的数量。
-        minio_limiter: Any, # 限制同时读取 MinIO 的数量。
-        chunk_limiter: Any, # 限制同时解析、切分文档的数量。
-        embed_limiter: Any, # 限制同时调用 Embedding 模型的数量
-        kg_limiter: Any, # 限制同时执行知识图谱任务的数量
-        set_progress: Any, # 更新 MySQL 中任务进度和进度信息
-        has_canceled: Any, # 检查任务是否已被用户取消
-        billing_hook: Optional[BillingHook] = None, # 可选的计费回调，默认不传
+        chat_limiter: Any,  # 限制同时调用 Chat/LLM 的数量。
+        minio_limiter: Any,  # 限制同时读取 MinIO 的数量。
+        chunk_limiter: Any,  # 限制同时解析、切分文档的数量。
+        embed_limiter: Any,  # 限制同时调用 Embedding 模型的数量
+        kg_limiter: Any,  # 限制同时执行知识图谱任务的数量
+        set_progress: Any,  # 更新 MySQL 中任务进度和进度信息
+        has_canceled: Any,  # 检查任务是否已被用户取消
+        billing_hook: Optional[BillingHook] = None,  # 可选的计费回调，默认不传
     ) -> None:
-        """Run a document processing task in production mode.
+        """在生产模式下运行文档处理任务。
 
-        Args:
-            task: Task configuration dictionary.
-            chat_limiter: Rate limiter for chat operations.
-            minio_limiter: Rate limiter for MinIO operations.
-            chunk_limiter: Rate limiter for chunking operations.
-            embed_limiter: Rate limiter for embedding operations.
-            kg_limiter: Rate limiter for knowledge graph operations.
-            set_progress: Progress callback function.
-            has_canceled: Function to check if task is canceled.
-            billing_hook: Optional billing hook for pipeline success/error callbacks.
-        """
+        参数：
+            任务：Task配置字典。
+            chat_limiter：聊天操作的速率限制器。
+            minio_limiter：MinIO 操作的速率限制器。
+            chunk_limiter：分块操作的速率限制器。
+            embed_limiter：嵌入操作的速率限制器。
+            kg_limiter：知识图操作的速率限制器。
+            set_progress：进度回调函数。
+            has_canceled：检查任务是否被取消的函数。
+            billing_hook：管道 success/error 回调的可选计费挂钩。"""
         # 该方法是新版执行器的装配入口，本身不解析文件：它把 Redis/MySQL 得到的 task、
         # 五类并发限流器、进度更新和取消检查统一包装成 TaskContext，再交给 TaskHandler。
         with recording_context_manager(_NULL_RECORDING_CONTEXT):
-            # Use NullRecordingContext in production to avoid memory allocation
-            set_recording_context(_NULL_RECORDING_CONTEXT) # 创建无记录模式, 正常生产模式不保存新旧流程对比数据，减少内存消耗
+            # 在生产中使用 NullRecordingContext 以避免内存分配
+            set_recording_context(_NULL_RECORDING_CONTEXT)  # 创建无记录模式, 正常生产模式不保存新旧流程对比数据，减少内存消耗
 
-            # Create TaskContext with all execution resources
-            task_context = TaskContext( # 把零散参数封装成 TaskContext
+            # 使用所有执行资源创建TaskContext
+            task_context = TaskContext(  # 把零散参数封装成 TaskContext
                 task=task,
                 limiters=TaskLimiters(
                     chat=chat_limiter,
@@ -123,29 +119,28 @@ class TaskManager:
         set_progress: Any,
         has_canceled: Any,
     ) -> None:
-        """Run a document processing task in dry-run mode for comparison.
+        """以空运行模式运行文档处理任务进行比较。
 
-        This executes the task with a write operation interceptor that records
-        all write operations, then compares the results with the production run.
+        这使用记录操作的写操作拦截器来执行任务
+        所有写入操作，然后将结果与生产运行进行比较。
 
-        Args:
-            task: Task configuration dictionary.
-            recording_ctx1: RecordingContext from production execution.
-            chat_limiter: Rate limiter for chat operations.
-            minio_limiter: Rate limiter for MinIO operations.
-            chunk_limiter: Rate limiter for chunking operations.
-            embed_limiter: Rate limiter for embedding operations.
-            kg_limiter: Rate limiter for knowledge graph operations.
-            set_progress: Progress callback function.
-            has_canceled: Function to check if task is canceled.
-        """
+        参数：
+            任务：Task配置字典。
+            recording_ctx1：来自生产执行的RecordingContext。
+            chat_limiter：聊天操作的速率限制器。
+            minio_limiter：MinIO 操作的速率限制器。
+            chunk_limiter：分块操作的速率限制器。
+            embed_limiter：嵌入操作的速率限制器。
+            kg_limiter：知识图操作的速率限制器。
+            set_progress：进度回调函数。
+            has_canceled：检查任务是否被取消的函数。"""
         interceptor = WriteOperationInterceptor(recording_ctx1.get_all_func_return_values())
         recording_ctx2 = RecordingContext()
 
         with recording_context_manager(recording_ctx2):
             set_recording_context(recording_ctx2)
 
-            # Create TaskContext with all execution resources
+            # 使用所有执行资源创建TaskContext
             task_context = TaskContext(
                 task=task,
                 limiters=TaskLimiters(
@@ -163,11 +158,11 @@ class TaskManager:
                 recording_context=recording_ctx2,
             )
 
-            # Execute with TaskHandler
+            # 使用 TaskHandler 执行
             handler = TaskHandler(ctx=task_context)
             await handler.handle_task()
 
-            # Compare results
+            # 比较结果
             comp: ContextComparator = ContextComparator()
             comp_result = comp.compare(task_context.id, recording_ctx1, recording_ctx2)
             logging.info(f"-------{task_context.name}, compare result:{comp_result.to_markdown()}")

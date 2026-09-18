@@ -12,17 +12,30 @@ sidebar_custom_props: {
 
 本文面向希望从“能够启动”进一步走到“能够解释、调试和修改 RAGFlow”的开发者。内容以当前仓库 `v0.27.1` 的源码为准，重点解释 Python 主链路，同时说明正在演进的 Go 实现、前端结构、数据存储及推荐的源码阅读顺序。
 
-运行环境、MinIO 的职责、macOS 启停及版本升级步骤，参见配套文档：[macOS 源码开发与版本升级](./macos_source_development_zh.md)。
+运行环境、MinIO 的职责、macOS 启停及版本升级步骤，参见配套文档：[macOS 源码开发与版本升级](./macOS源码开发与版本升级.md)。
 
 本文是整个学习体系的总览和路线图。需要深入源码时，继续阅读以下分册：
 
 | 分册 | 重点内容 |
 |---|---|
-| [第一册：运行时、配置与数据模型](./ragflow_learning/01_runtime_configuration_and_data.md) | 进程、配置覆盖、四类存储、Peewee 模型和 Service 边界 |
-| [第二册：文档摄取与深度解析](./ragflow_learning/02_ingestion_and_parsing.md) | 上传、任务、队列、解析器、Chunk、Embedding 和索引 |
-| [第三册：检索、问答与引用](./ragflow_learning/03_retrieval_chat_and_citations.md) | 全文/向量召回、融合、重排、Prompt、流式生成和引用 |
-| [第四册：Agent Canvas 与前端](./ragflow_learning/04_agent_and_frontend.md) | React 请求链、后端分流、DSL、组件、变量和工作流事件 |
-| [第五册：Go 实现、测试与调试](./ragflow_learning/05_go_testing_and_debugging.md) | Go 分层、Ingestor、CGO、测试体系和跨进程诊断 |
+| [学习导航与端到端地图](./ragflow_learning/00_学习导航与端到端地图.md) | 阅读顺序、三条主链路、核心 ID 和动手实验 |
+| [第一册：运行时、配置与数据模型](./ragflow_learning/01_运行时配置与数据模型.md) | 进程、配置覆盖、四类存储、Peewee 模型和 Service 边界 |
+| [第二册：文档摄取与深度解析](./ragflow_learning/02_文档摄取与深度解析.md) | 上传、任务、队列、解析器、Chunk、Embedding 和索引 |
+| [第三册：检索、问答与引用](./ragflow_learning/03_检索问答与引用.md) | 全文/向量召回、融合、重排、Prompt、流式生成和引用 |
+| [第四册：Agent Canvas 与前端](./ragflow_learning/04_智能体与前端.md) | React 请求链、后端分流、DSL、组件、变量和工作流事件 |
+| [第五册：Go 实现、测试与调试](./ragflow_learning/05_Go实现测试与调试.md) | Go 分层、Ingestor、CGO、测试体系和跨进程诊断 |
+| [第六册：API、鉴权、租户与权限](./ragflow_learning/06_API鉴权租户与权限.md) | Quart 路由、登录/API Token、团队租户和资源授权 |
+| [第七册：状态、一致性与故障恢复](./ragflow_learning/07_状态一致性与故障恢复.md) | 状态机、Redis Pending、幂等、补偿、删除与重解析 |
+| [第八册：日志、断点与端到端排障](./ragflow_learning/08_日志断点与端到端排障.md) | 结构化日志、条件断点、四种存储检查和决策树 |
+| [第九册：扩展、升级与 Git 协作](./ragflow_learning/09_扩展升级与Git协作.md) | API/parser/model/storage 扩展、测试、升级和回滚 |
+| [第十册：源码索引与数据字典](./ragflow_learning/10_源码索引与数据字典.md) | 模型、枚举、函数入口、关键参数和检索公式速查 |
+| [第十一册：GraphRAG、RAPTOR 与高级数据流水线](./ragflow_learning/11_高级RAG与数据流水线.md) | 多跳图检索、层级摘要、Dataflow、知识编译、Memory 和连接器 |
+| [第十二册：知识库产品完整链路](./ragflow_learning/12_知识库产品完整链路.md) | 知识库创建、配置、文档、测试、元数据、图谱和删除 |
+| [第十三册：聊天应用、会话与消息链路](./ragflow_learning/13_聊天应用会话与消息链路.md) | Dialog、Conversation、消息、SSE、引用、反馈和分享 |
+| [第十四册：搜索应用完整链路](./ragflow_learning/14_搜索应用完整链路.md) | Search App 配置、检索、摘要、分享及其与聊天的区别 |
+| [第十五册：智能体产品、版本与运行链路](./ragflow_learning/15_智能体产品版本与运行链路.md) | Canvas 创建、版本、发布、会话、运行、日志、工具和 Webhook |
+| [第十六册：记忆的提取、存储与召回](./ragflow_learning/16_记忆提取存储与召回.md) | 记忆类型、异步提取、独立索引、混合召回和 Agent 集成 |
+| [第十七册：文件管理、知识库链接与版本](./ragflow_learning/17_文件管理知识库链接与版本.md) | 目录树、对象存储、File2Document、版本、下载和删除 |
 
 总览用于建立地图，分册用于逐模块精读和动手实验。两者不是重复关系。
 
@@ -133,7 +146,7 @@ Docker: MySQL + Redis + MinIO + Elasticsearch
 | Python Worker | `rag/svr/task_executor.py` | 消费文档任务，解析、向量化并建立索引 |
 | 前端 | `web/src/main.tsx` | 初始化语言和后端类型，渲染 React 应用 |
 
-本机已经验证过的完整命令、端口与健康检查以 [macOS 源码开发与版本升级](./macos_source_development_zh.md) 为准。
+本机已经验证过的完整命令、端口与健康检查以 [macOS 源码开发与版本升级](./macOS源码开发与版本升级.md) 为准。
 
 ### 4.2 Python API 启动过程
 

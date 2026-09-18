@@ -44,6 +44,7 @@ def _full_text_weight(vector_similarity_weight):
 @login_required
 @validate_request("name")
 async def create():
+    """创建搜索应用配置；真正的检索只在回答接口发生。"""
     req = await get_request_json()
     search_name = req["name"]
     description = req.get("description", "")
@@ -69,6 +70,7 @@ async def create():
         try:
             if not SearchService.save(**req):
                 return get_data_error_result()
+            logging.info("搜索应用已创建 租户ID=%s 搜索应用ID=%s", current_user.id, req["id"])
             return get_json_result(data={"search_id": req["id"]})
         except Exception as e:
             return server_error_response(e)
@@ -151,13 +153,14 @@ async def update(search_id):
         if req["name"].lower() != search_app.name.lower() and len(SearchService.query(name=req["name"], tenant_id=current_user.id, status=StatusEnum.VALID.value)) >= 1:
             return get_data_error_result(message="Duplicated search name.")
 
+        # PUT 采用配置合并而不是整块替换，未出现在请求中的检索参数继续沿用旧值。
         current_config = search_app.search_config or {}
         new_config = req["search_config"]
         if not isinstance(new_config, dict):
             return get_data_error_result(message="search_config must be a JSON object")
         req["search_config"] = {**current_config, **new_config}
         logging.debug(
-            "Search update weight: search_id=%s user_id=%s incoming_vector_similarity_weight=%s stored_vector_similarity_weight=%s stored_full_text_weight=%s",
+            "搜索应用权重已更新 搜索应用ID=%s 用户ID=%s 请求向量权重=%s 保存向量权重=%s 保存全文权重=%s",
             search_id,
             current_user.id,
             new_config.get("vector_similarity_weight"),
@@ -201,6 +204,7 @@ def delete_search(search_id):
 @login_required
 @validate_request("question")
 async def completion(search_id):
+    """搜索应用执行入口：加载持久化 search_config，并以 SSE 返回检索或摘要结果。"""
     if not SearchService.accessible4deletion(search_id, current_user.id):
         return get_json_result(
             data=False,
@@ -216,7 +220,7 @@ async def completion(search_id):
 
     search_config = search_app.get("search_config", {})
     logging.debug(
-        "Search completion loaded weight: search_id=%s user_id=%s stored_vector_similarity_weight=%s stored_full_text_weight=%s",
+        "搜索回答已加载权重 搜索应用ID=%s 用户ID=%s 向量权重=%s 全文权重=%s",
         search_id,
         uid,
         search_config.get("vector_similarity_weight", 0.3),
@@ -226,17 +230,31 @@ async def completion(search_id):
     if not kb_ids:
         return get_data_error_result(message="`kb_ids` is required.")
 
-    # check if the kb_ids is accessible for this user
+    # 逐个校验当前用户是否有权访问请求中的知识库。
     for kb_id in kb_ids:
         if not KnowledgebaseService.accessible(kb_id=kb_id, user_id=uid):
             return get_data_error_result(message=f"You don't own the dataset {kb_id}")
+
+    # async_ask 内部会继续进入 search_datasets -> Dealer.retrieval。这里只记录问题长度，
+    # 不记录原始问题或返回 Chunk 正文。
+    logging.info(
+        "搜索回答已开始 租户ID=%s 搜索应用ID=%s 知识库ID列表=%s 问题长度=%d 向量权重=%s 是否启用重排=%s",
+        uid,
+        search_id,
+        kb_ids,
+        len(str(req["question"] or "")),
+        search_config.get("vector_similarity_weight", 0.3),
+        bool(search_config.get("rerank_id") or search_config.get("tenant_rerank_id")),
+    )
 
     async def stream():
         nonlocal req, uid, kb_ids, search_config
         try:
             async for ans in async_ask(req["question"], kb_ids, uid, search_config=search_config, search_id=search_id):
                 yield "data:" + json.dumps({"code": 0, "message": "", "data": ans}, ensure_ascii=False) + "\n\n"
+            logging.info("搜索回答完成 租户ID=%s 搜索应用ID=%s 知识库数=%d", uid, search_id, len(kb_ids))
         except Exception as ex:
+            logging.exception("搜索回答失败 租户ID=%s 搜索应用ID=%s", uid, search_id)
             yield (
                 "data:"
                 + json.dumps(

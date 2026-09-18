@@ -20,20 +20,20 @@ from rag.svr.task_executor_refactor.recording_context import timed_with_recordin
 
 start_ts = time.time()
 
-# LiteLLM fetches a model cost map from GitHub during import unless this is set.
-# Parser pods should not block startup on external network access.
+# LiteLLM 在导入期间从 GitHub 获取模型成本图，除非已设置。
+# 解析器 Pod 不应阻止外部网络访问的启动。
 import os
 
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")  # no internet, save about 10s
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")  # 无网络，节省约10s
 
 from common.misc_utils import thread_pool_exec
 
 import asyncio
 import socket
 
-# from beartype import BeartypeConf
-# from beartype.claw import beartype_all  # <-- you didn't sign up for this
-# beartype_all(conf=BeartypeConf(violation_type=UserWarning))    # <-- emit warnings from all code
+# 来自熊型进口 BeartypeConf
+# from beartype.claw import beartype_all # <-- 您没有注册此帐户
+# beartype_all(conf=BeartypeConf(violation_type=UserWarning)) # <-- 从所有代码发出警告
 import random
 import sys
 import threading
@@ -143,8 +143,8 @@ TASK_TYPE_TO_PIPELINE_TASK_TYPE = {
     "structure": PipelineTaskType.STRUCTURE,
 }
 
-# KB-wide fan-out task types: their task row's ``doc_id`` is a fake sentinel and
-# the participating documents live in ``task["doc_ids"]``.
+# KB 范围的扇出任务类型：其任务行的 ``doc_id`` 是一个假哨兵，并且
+# 参与文档位于“`task["doc_ids"]`”中。
 _KB_FANOUT_TASK_TYPES = [
     "graphrag",
     "raptor",
@@ -160,7 +160,7 @@ _KB_FANOUT_TASK_TYPES = [
 ]
 
 UNACKED_ITERATOR = None
-# Task type and executor index (consistent with SAAS version)
+# Task类型及执行器索引（与SAAS版本一致）
 TASK_TYPE = "common"
 TE_IDX = "0"
 
@@ -177,7 +177,7 @@ stop_event = threading.Event()
 
 
 def signal_handler(sig, frame):
-    logging.info("Received interrupt signal, shutting down...")
+    logging.info("收到中断信号，正在关闭...")
     stop_event.set()
     time.sleep(1)
     sys.exit(0)
@@ -271,7 +271,7 @@ async def collect():
         task = TaskService.get_task(msg["id"])
 
     if task:
-        canceled = has_canceled(task["id"]) # 判断任务是否已取消
+        canceled = has_canceled(task["id"])  # 判断任务是否已取消
     if not task or canceled:
         state = "is unknown" if not task else "has been cancelled"
         FAILED_TASKS += 1
@@ -280,7 +280,7 @@ async def collect():
         return None, None
 
     logging.info(
-        "task_collected task_id=%s doc_id=%s kb_id=%s parser_id=%s from_page=%s to_page=%s",
+        "任务已被消费者领取 任务ID=%s 文档ID=%s 知识库ID=%s 解析器ID=%s 起始页=%s 结束页=%s",
         task.get("id"),
         task.get("doc_id"),
         task.get("kb_id"),
@@ -291,11 +291,11 @@ async def collect():
 
     task_type = msg.get("task_type", "")
     task["task_type"] = task_type
-    # Per-doc fan-out task types (today: doc-scoped raptor) carry their
-    # participating doc id list on the Redis message but not on the DB
-    # row. The KB-scoped branch above already does this for FAKE doc
-    # tasks; mirror here so ``ctx.doc_ids`` is populated for the
-    # per-doc path too.
+    # 每个文档扇出任务类型（今天：文档范围的 raptor）具有其
+    # Redis 消息上但不在 DB 上的参与文档 ID 列表
+    # 排。上面的 KB 范围分支已经为 FAKE 文档执行此操作
+    # 任务；此处镜像，以便填充“`ctx.doc_ids`”
+    # 每个文档路径也是如此。
     if "doc_ids" in msg and not task.get("doc_ids"):
         task["doc_ids"] = msg.get("doc_ids", []) or []
     if task_type[:8] == "dataflow":
@@ -345,8 +345,8 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
         logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
 
-    # Table parser column roles / mode are stored on the dataset (KB) parser_config;
-    # chunk tasks carry document-level parser_config only — merge KB keys so manual roles apply.
+    # 表解析器列角色/模式存储在数据集上 (KB) parser_config；
+    # 块任务仅携带文档级 parser_config — 合并 KB 密钥，以便应用手动角色。
     parser_config_for_chunk = merge_table_parser_config_from_kb(task)
     if task.get("parser_id", "").lower() == "table" and task.get("kb_parser_config"):
         logging.debug(
@@ -355,7 +355,7 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
             f"roles_keys={list((parser_config_for_chunk.get('table_column_roles') or {}).keys())}"
         )
 
-    # Record chunk configuration for comparison
+    # 记录 chunk 配置以进行比较
     from common.float_utils import normalize_overlapped_percent
 
     chunk_config = {
@@ -397,10 +397,10 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
         logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
 
-    # Record raw chunks for comparison
+    # 记录原始块以进行比较
     get_recording_context().record("raw_chunks", cks)
 
-    # Extract and persist PDF outline if the parser attached it.
+    # 提取并保留 PDF 大纲（如果解析器附加了它）。
     outline_data = cks[0].get("__outline__") if cks else None
     get_recording_context().record("outline_data", outline_data)
 
@@ -409,9 +409,9 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
         try:
             ret = DocMetadataService.update_document_metadata(task["doc_id"], update_metadata_to({"outline": outline}, DocMetadataService.get_document_metadata(task["doc_id"]) or {}))
             get_recording_context().save_func_return_value("DocMetadataService.update_document_metadata", ret)
-            logging.info("Persisted PDF outline (%d entries) for doc %s", len(outline), task["doc_id"])
+            logging.info("PDF大纲已持久化 条目数=%d 文档ID=%s", len(outline), task["doc_id"])
         except Exception as e:
-            logging.warning("Failed to persist PDF outline for doc %s: %s", task["doc_id"], e)
+            logging.warning("无法保留文档 %s 的 PDF 大纲：%s", task["doc_id"], e)
 
     docs = []
     doc = {"doc_id": task["doc_id"], "kb_id": str(task["kb_id"])}
@@ -458,7 +458,7 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
     el = timer() - st
     logging.info("MINIO PUT({}) cost {:.3f} s".format(task["name"], el))
 
-    # Record docs after MinIO upload
+    # MinIO上传后记录文档
     get_recording_context().record("docs_after_prep", docs)
 
     rag_tokenizer.tokenizer.set_language(task["language"])
@@ -496,7 +496,7 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
             raise
         progress_callback(msg="Keywords generation {} chunks completed in {:.2f}s".format(len(docs), timer() - st))
 
-    # Record keywords extraction count
+    # 记录关键词提取次数
     keywords = [d for d in docs if d.get("important_kwd")]
     get_recording_context().record("keywords_extracted", keywords)
 
@@ -525,14 +525,14 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
         try:
             await asyncio.gather(*tasks, return_exceptions=False)
         except Exception as e:
-            logging.error("Error in doc_question_proposal", exc_info=e)
+            logging.error("doc_question_proposal 中的错误", exc_info=e)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         progress_callback(msg="Question generation {} chunks completed in {:.2f}s".format(len(docs), timer() - st))
 
-    # Record question generation
+    # 记录问题生成
     questions = [d for d in docs if d.get("question_kwd")]
     get_recording_context().record("questions_generated", questions)
 
@@ -577,7 +577,7 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
         try:
             await asyncio.gather(*tasks, return_exceptions=False)
         except Exception as e:
-            logging.error("Error in doc_question_proposal", exc_info=e)
+            logging.error("doc_question_proposal 中的错误", exc_info=e)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -594,7 +594,7 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
             get_recording_context().save_func_return_value("DocMetadataService.update_document_metadata", ret)
         progress_callback(msg="Question generation {} chunks completed in {:.2f}s".format(len(docs), timer() - st))
 
-    # Record metadata generation count
+    # 记录元数据生成计数
     metadata_list = [d for d in docs if d.get("metadata_obj")]
     get_recording_context().record("metadata_list_generated", metadata_list)
 
@@ -662,11 +662,11 @@ async def build_chunks(task, progress_callback, on_chunking_start=None):
             raise
         progress_callback(msg="Tagging {} chunks completed in {:.2f}s".format(len(docs), timer() - st))
 
-    # Record tags applied
+    # 已应用记录标签
     tags_applied = [d for d in docs if d.get(TAG_FLD)]
     get_recording_context().record("tags_applied", tags_applied)
 
-    # Record final chunks for comparison
+    # 记录最终块以进行比较
     get_recording_context().record("final_chunks", docs)
     final_chunk_ids = [c.get("id") for c in docs if isinstance(c, dict) and "id" in c]
     get_recording_context().record("final_chunk_ids_count", len(final_chunk_ids))
@@ -741,7 +741,7 @@ async def embedding(docs, mdl, parser_config=None, callback=None):
             c = d["content_with_weight"]
         c = re.sub(r"</?(table|td|caption|tr|th)( [^<>]{0,12})?>", " ", c)
         if not c.strip():
-            logging.debug("embedding(): normalized whitespace-only chunk to placeholder 'None' (len=%d)", len(c))
+            logging.debug("embedding()：将纯空白块归一化为占位符 'None' (len=%d)", len(c))
             c = "None"
         cnts.append(c)
 
@@ -764,7 +764,7 @@ async def embedding(docs, mdl, parser_config=None, callback=None):
         tk_count += c
         callback(prog=0.7 + 0.2 * (i + 1) / len(cnts), msg="")
     cnts = np.vstack(cnts_batches) if cnts_batches else np.array([])
-    filename_embd_weight = parser_config.get("filename_embd_weight", 0.1)  # due to the db support none value
+    filename_embd_weight = parser_config.get("filename_embd_weight", 0.1)  # 由于数据库支持无值
     if not filename_embd_weight:
         filename_embd_weight = 0.1
     title_w = float(filename_embd_weight)
@@ -825,7 +825,7 @@ async def run_dataflow(task: dict):
         return
 
     embedding_token_consumption = chunks.get("embedding_token_consumption", 0)
-    # The output key may exist with an empty payload; check presence, not truthiness.
+    # 输出密钥可能存在空负载；检查存在性，而不是真实性。
     if "chunks" in chunks:
         chunks = copy.deepcopy(chunks["chunks"])
         output_type = "chunks"
@@ -848,7 +848,7 @@ async def run_dataflow(task: dict):
     get_recording_context().record("pipeline_output_type", output_type)
     get_recording_context().record("pipeline_output_count", len(chunks))
 
-    # An empty normalized payload means "nothing parsed", so stop before embedding/indexing.
+    # 空的标准化有效负载意味着 "nothing parsed"，因此在 embedding/indexing. 之前停止
     if not chunks:
         ret = PipelineOperationLogService.create(document_id=doc_id, pipeline_id=dataflow_id, task_type=PipelineTaskType.PARSE, dsl=str(pipeline))
         get_recording_context().save_func_return_value("PipelineOperationLogService.create", ret)
@@ -957,7 +957,7 @@ async def run_dataflow(task: dict):
     try:
         ret = DocumentService.increment_chunk_num(doc_id, task_dataset_id, embedding_token_consumption, len(chunks), task_time_cost)
     except Exception:
-        logging.exception("increment_chunk_num failed for doc %s", doc_id)
+        logging.exception("increment_chunk_num 文档 %s 失败", doc_id)
         ret = None
     set_progress(task_id, prog=1.0, msg="Indexing done ({:.2f}s). Task done ({:.2f}s)".format(time_cost, task_time_cost))
     get_recording_context().save_func_return_value("DocumentService.increment_chunk_num", ret)
@@ -971,12 +971,12 @@ RAPTOR_METHOD_SEARCH_LIMIT = 10000
 
 
 async def get_raptor_chunk_field_map(doc_id: str, tenant_id: str, kb_id: str) -> dict:
-    """Return stored RAPTOR marker fields for a document."""
+    """返回文档的存储 RAPTOR 标记字段。"""
     from common.doc_store.doc_store_base import OrderByExpr
     from rag.nlp import search as nlp_search
 
     async def search_fields(fields: list[str], condition: dict, order_by=None):
-        """Search chunk fields in the current knowledge base."""
+        """Search 当前知识库中的块字段。"""
         res = await thread_pool_exec(settings.docStoreConn.search, fields, [], condition, [], order_by or OrderByExpr(), 0, RAPTOR_METHOD_SEARCH_LIMIT, nlp_search.index_name(tenant_id), [kb_id])
         return settings.docStoreConn.get_fields(res, fields)
 
@@ -991,23 +991,22 @@ async def get_raptor_chunk_field_map(doc_id: str, tenant_id: str, kb_id: str) ->
             OrderByExpr().desc("create_timestamp_flt"),
         )
     except Exception:
-        logging.debug("RAPTOR fallback method lookup with extra field failed for doc %s", doc_id, exc_info=True)
+        logging.debug("RAPTOR 文档 %s 的额外字段后备方法查找失败", doc_id, exc_info=True)
         return primary
 
 
 async def get_raptor_chunk_methods(doc_id: str, tenant_id: str, kb_id: str) -> set[str]:
-    """Return the RAPTOR tree builders already stored for doc_id.
+    """返回已为 doc_id 存储的 RAPTOR 树构建器。
 
-    Queries directly for raptor_kwd="raptor" rows so a non-RAPTOR leading
-    chunk cannot produce a false-negative result. Legacy summary chunks that
-    do not have method metadata are treated as the original RAPTOR builder.
-    """
+    直接查询 raptor_kwd="raptor" 行，因此非 RAPTOR 领先
+    chunk 不能产生假阴性结果。遗留的摘要块
+    没有方法元数据被视为原始 RAPTOR 构建器。"""
     try:
         field_map = await get_raptor_chunk_field_map(doc_id, tenant_id, kb_id)
         methods = collect_raptor_methods(field_map)
         if methods:
             logging.info(
-                "Checkpoint hit: RAPTOR chunks for doc %s (tenant=%s kb=%s methods=%s) already exist",
+                "检查点命中：文档 %s 的 RAPTOR 块（租户 = %s kb = %s 方法 = %s）已存在",
                 doc_id,
                 tenant_id,
                 kb_id,
@@ -1015,28 +1014,28 @@ async def get_raptor_chunk_methods(doc_id: str, tenant_id: str, kb_id: str) -> s
             )
         else:
             logging.info(
-                "Checkpoint miss: no RAPTOR chunks for doc %s (tenant=%s kb=%s)",
+                "检查点未命中：文档 %s 没有 RAPTOR 块（租户 = %s kb = %s）",
                 doc_id,
                 tenant_id,
                 kb_id,
             )
         return methods
     except Exception:
-        logging.exception("Failed to check RAPTOR chunks for doc %s", doc_id)
+        logging.exception("无法检查文档 %s 的 RAPTOR 块", doc_id)
         raise
 
 
 async def has_raptor_chunks(doc_id: str, tenant_id: str, kb_id: str, tree_builder: str = RAPTOR_TREE_BUILDER) -> bool:
-    """Return whether doc_id already has summaries for tree_builder."""
+    """返回 doc_id 是否已经有 tree_builder 的摘要。"""
     methods = await get_raptor_chunk_methods(doc_id, tenant_id, kb_id)
     return tree_builder in methods
 
 
 async def delete_raptor_chunks(doc_id: str, tenant_id: str, kb_id: str, keep_method: str | None = None):
-    """Delete RAPTOR summaries for doc_id, optionally preserving one method."""
+    """删除 doc_id 的 RAPTOR 摘要，可选择保留一种方法。"""
     if keep_method is None:
         logging.info(
-            "delete_raptor_chunks: removing all RAPTOR summaries (doc=%s tenant=%s kb=%s)",
+            "delete_raptor_chunks：删除所有 RAPTOR 摘要（doc=%s 租户=%s kb=%s）",
             doc_id,
             tenant_id,
             kb_id,
@@ -1054,7 +1053,7 @@ async def delete_raptor_chunks(doc_id: str, tenant_id: str, kb_id: str, keep_met
     chunk_ids = collect_raptor_chunk_ids(field_map, exclude_methods={keep_method})
     if not chunk_ids:
         logging.debug(
-            "delete_raptor_chunks: no stale RAPTOR chunks to remove (doc=%s tenant=%s kb=%s keep=%s)",
+            "delete_raptor_chunks：没有要删除的陈旧 RAPTOR 块（doc=%s 租户=%s kb=%s保留=%s)",
             doc_id,
             tenant_id,
             kb_id,
@@ -1063,7 +1062,7 @@ async def delete_raptor_chunks(doc_id: str, tenant_id: str, kb_id: str, keep_met
         return 0
 
     logging.info(
-        "delete_raptor_chunks: removing %d stale RAPTOR chunks (doc=%s tenant=%s kb=%s keep=%s)",
+        "delete_raptor_chunks：删除 %d 过时的 RAPTOR 块（doc=%s 租户=%s kb=%s 保留=%s)",
         len(chunk_ids),
         doc_id,
         tenant_id,
@@ -1084,7 +1083,7 @@ async def delete_raptor_chunks(doc_id: str, tenant_id: str, kb_id: str, keep_met
 async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_size, callback=None, doc_ids=[]):
     tree_builder = "raptor"
     clustering_method = "watershed"
-    """Generate RAPTOR summaries for selected documents in a knowledge base."""
+    """为知识库中选定的文档生成 RAPTOR 摘要。"""
     fake_doc_id = GRAPH_RAPTOR_FAKE_DOC_ID
 
     rag_tokenizer.tokenizer.set_language(row.get("language", "English"))
@@ -1109,13 +1108,13 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         }
 
     def schedule_raptor_cleanup(doc_id: str, keep_method: str | None = None):
-        """Queue stale RAPTOR summaries for deletion after successful insert."""
+        """队列陈旧 RAPTOR 成功插入后删除的摘要。"""
         cleanup_plan = (doc_id, keep_method)
         if cleanup_plan not in cleanup_raptor_chunks:
             cleanup_raptor_chunks.append(cleanup_plan)
 
     def skip_raptor_doc(doc_id: str) -> bool:
-        """Return whether RAPTOR should be skipped for this source document."""
+        """返回此源文档是否应跳过 RAPTOR。"""
         doc_info = doc_info_by_id.get(doc_id, {})
         file_type = doc_info.get("type") or row.get("type", "")
         parser_id = doc_info.get("parser_id") or row.get("parser_id", "")
@@ -1123,16 +1122,16 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         if should_skip_raptor(file_type, parser_id, parser_config, raptor_config):
             skip_reason = get_skip_reason(file_type, parser_id, parser_config)
             doc_name = doc_info.get("name") or doc_id
-            logging.info("Skipping Raptor for document %s: %s", doc_name, skip_reason)
+            logging.info("跳过 Raptor 文件 %s：%s", doc_name, skip_reason)
             callback(msg=f"[RAPTOR] doc:{doc_id} skipped: {skip_reason}")
             return True
         return False
 
     async def generate(chunks, did):
-        """Run RAPTOR and append generated summary chunks for one doc id."""
+        """运行 RAPTOR 并附加为一个文档 ID 生成的摘要块。"""
         nonlocal tk_count, res
-        logging.info("RAPTOR: using tree_builder=%s clustering_method=%s for doc %s", tree_builder, clustering_method, did)
-        from rag.advanced_rag.knowlege_compile.raptor import RecursiveAbstractiveProcessing4TreeOrganizedRetrieval as Raptor  # Lazy load, save around 8s
+        logging.info("RAPTOR：使用 tree_builder=%s clustering_method=%s 用于文档 %s", tree_builder, clustering_method, did)
+        from rag.advanced_rag.knowlege_compile.raptor import RecursiveAbstractiveProcessing4TreeOrganizedRetrieval as Raptor  # 懒加载，节省8s左右
 
         raptor = Raptor(
             raptor_config.get("max_cluster", 64),
@@ -1158,13 +1157,13 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         if row["pagerank"]:
             doc[PAGERANK_FLD] = int(row["pagerank"])
 
-        # Build index→layer mapping from RAPTOR layer boundaries.
-        # layers is [(start, end), ...] where layer 0 is the original chunks
-        # and layer 1+ are summary layers. We skip layer 0 (original chunks).
+        # 从 RAPTOR 图层边界构建索引→图层映射。
+        # 层是 [(start, end), ...]，其中层 0 是原始块
+        # 和层 1+ 是汇总层。我们跳过第 0 层（原始块）。
         chunk_layer = {}
         for layer_idx, (layer_start, layer_end) in enumerate(layers):
             if layer_idx == 0:
-                continue  # layer 0 = original input chunks, not summaries
+                continue  # 层 0 = 原始输入块，而不是摘要
             for ci in range(layer_start, layer_end):
                 chunk_layer[ci] = layer_idx
 
@@ -1192,7 +1191,7 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
             if skip_raptor_doc(doc_id):
                 callback(prog=(x + 1.0) / len(doc_ids))
                 continue
-            # CHECKPOINT: skip docs that already have RAPTOR chunks in the doc store
+            # CHECKPOINT：跳过文档存储中已有 RAPTOR 块的文档
             existing_methods = await get_raptor_chunk_methods(doc_id, row["tenant_id"], row["kb_id"])
             if tree_builder in existing_methods:
                 has_file_level_target = True
@@ -1208,7 +1207,7 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
             chunks = []
             skipped_chunks = 0
             for d in settings.retriever.chunk_list(doc_id, row["tenant_id"], [str(row["kb_id"])], fields=["content_with_weight", vctr_nm], sort_by_position=True):
-                # Skip chunks that don't have the required vector field (may have been indexed with different embedding model)
+                # 跳过不具有所需向量场的块（可能已使用不同的嵌入模型进行索引）
                 if vctr_nm not in d or d[vctr_nm] is None:
                     skipped_chunks += 1
                     logging.warning(f"RAPTOR: Chunk missing vector field '{vctr_nm}' in doc {doc_id}, skipping")
@@ -1270,7 +1269,7 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
             if doc_id in skipped_doc_ids:
                 continue
             for d in settings.retriever.chunk_list(doc_id, row["tenant_id"], [str(row["kb_id"])], fields=["content_with_weight", vctr_nm], sort_by_position=True):
-                # Skip chunks that don't have the required vector field
+                # 跳过不具有所需向量场的块
                 if vctr_nm not in d or d[vctr_nm] is None:
                     skipped_chunks += 1
                     logging.warning(f"RAPTOR: Chunk missing vector field '{vctr_nm}' in doc {doc_id}, skipping")
@@ -1310,16 +1309,14 @@ async def delete_image(kb_id, chunk_id):
 
 @timed_with_recording
 async def insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks, progress_callback):
-    """
-    Insert chunks into document store (Elasticsearch OR Infinity).
+    """将块插入文档存储（Elasticsearch OR Infinity）。
 
-    Args:
-        task_id: Task identifier
-        task_tenant_id: Tenant ID
-        task_dataset_id: Dataset/knowledge base ID
-        chunks: List of chunk dictionaries to insert
-        progress_callback: Callback function for progress updates
-    """
+    参数：
+        task_id：Task标识符
+        task_tenant_id：租户ID
+        task_dataset_id：Dataset/knowledge底座ID
+        chunks：要插入的块字典列表
+        progress_callback：进度更新的回调函数"""
     from rag.svr.task_executor_refactor.chunk_service import apply_source_chunks_document_availability
 
     apply_source_chunks_document_availability(chunks)
@@ -1368,8 +1365,8 @@ async def insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks, progre
         get_recording_context().save_func_return_value("docStoreConn.insert", doc_store_result)
         task_canceled = has_canceled(task_id)
         if task_canceled:
-            # Roll back partial RAPTOR summary inserts so the next run is not
-            # mistaken for a completed checkpoint by get_raptor_chunk_methods.
+            # 回滚部分 RAPTOR 摘要插入，以便下次运行不会
+            # 被 get_raptor_chunk_methods 误认为已完成的检查点。
             raptor_ids_to_rollback = [c["id"] for c in chunks[: b + settings.DOC_BULK_SIZE] if c.get("raptor_kwd") == "raptor"]
             if raptor_ids_to_rollback:
                 try:
@@ -1381,13 +1378,13 @@ async def insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks, progre
                     )
                     get_recording_context().save_func_return_value("docStoreConn.delete", ret)
                     logging.info(
-                        "insert_chunks: rolled back %d partial RAPTOR chunks after cancellation (task=%s)",
+                        "insert_chunks：取消后回滚%d部分RAPTOR块（任务= %s）",
                         len(raptor_ids_to_rollback),
                         task_id,
                     )
                 except Exception:
                     logging.exception(
-                        "insert_chunks: failed to roll back partial RAPTOR chunks after cancellation (task=%s)",
+                        "insert_chunks：取消后无法回滚部分 RAPTOR 块（任务 = %s）",
                         task_id,
                     )
             progress_callback(-1, msg="Task has been canceled.")
@@ -1448,7 +1445,7 @@ async def do_handle_task(task):
     task_embedding_id = task["embd_id"]
     task_language = task.get("language") or "Chinese"
     if not task.get("language"):
-        logging.warning("Task %s has no language set, falling back to Chinese", task_id)
+        logging.warning("Task %s 无语言设置，回退为中文", task_id)
     rag_tokenizer.tokenizer.set_language(task_language)
     doc_task_llm_id = task["parser_config"].get("llm_id") or task["llm_id"]
     kb_task_llm_id = task["kb_parser_config"].get("llm_id") or task["llm_id"]
@@ -1461,7 +1458,7 @@ async def do_handle_task(task):
     toc_thread = None
     raptor_cleanup_chunks = []
 
-    # prepare the progress callback function
+    # 准备进度回调函数
     progress_callback = partial(set_progress, task_id, task_from_page, task_to_page)
 
     task_canceled = has_canceled(task_id)
@@ -1470,7 +1467,7 @@ async def do_handle_task(task):
         return
 
     try:
-        # bind embedding model
+        # 绑定嵌入模型
         if task_embedding_id:
             embd_model_config = resolve_model_config(task_tenant_id, LLMType.EMBEDDING, task_embedding_id)
         else:
@@ -1518,10 +1515,10 @@ async def do_handle_task(task):
                 progress_callback(prog=-1.0, msg="Internal error: Invalid RAPTOR configuration")
                 return
 
-        # bind LLM for raptor
+        # 绑定 LLM 猛禽
         chat_model_config = resolve_model_config(task_tenant_id, LLMType.CHAT, kb_task_llm_id)
         chat_model = LLMBundle(task_tenant_id, chat_model_config, lang=task_language)
-        # run RAPTOR
+        # 运行RAPTOR
         async with kg_limiter:
             chunks, token_count, raptor_cleanup_chunks = await run_raptor_for_kb(
                 row=task,
@@ -1535,8 +1532,8 @@ async def do_handle_task(task):
         get_recording_context().record("raptor_chunks", chunks)
         get_recording_context().record("raptor_token_count", token_count)
         if fake_doc_ids := task.get("doc_ids", []):
-            task_doc_id = fake_doc_ids[0]  # use the first document ID to represent this task for logging purposes
-    # Either using graphrag or Standard chunking methods
+            task_doc_id = fake_doc_ids[0]  # 使用第一个文档 ID 来表示此任务用于记录目的
+    # 使用 graphrag 或标准分块方法
     elif task_type == "graphrag":
         ok, kb = KnowledgebaseService.get_by_id(task_dataset_id)
         if not ok:
@@ -1583,8 +1580,8 @@ async def do_handle_task(task):
         with_resolution = graphrag_conf.get("resolution", False)
         with_community = graphrag_conf.get("community", False)
         async with kg_limiter:
-            # await run_graphrag(task, task_language, with_resolution, with_community, chat_model, embedding_model, progress_callback)
-            from rag.graphrag.general.index import run_graphrag_for_kb  # Lazy load, save around 2s
+            # 等待run_graphrag（任务，task_language，with_resolution，with_community，chat_model，embedding_model， progress_callback)
+            from rag.graphrag.general.index import run_graphrag_for_kb  # 懒加载，节省2s左右
 
             result = await run_graphrag_for_kb(
                 row=task,
@@ -1609,7 +1606,7 @@ async def do_handle_task(task):
         progress_callback(-1, "Skill generation requires the refactored task executor (TE_RUN_MODE=0).")
         return
     else:
-        # Standard chunking methods
+        # 标准分块方法
         task["llm_id"] = doc_task_llm_id
 
         def on_chunking_start(wait_time):
@@ -1619,10 +1616,10 @@ async def do_handle_task(task):
         start_ts = timer()
         chunks = await build_chunks(task, progress_callback, on_chunking_start)
         get_recording_context().record("chunks", chunks)
-        # Record chunk_ids_count for comparison
+        # 记录chunk_ids_count进行比较
         chunk_ids = [c.get("id") for c in chunks if isinstance(c, dict) and "id" in c]
         get_recording_context().record("chunk_ids_count", len(chunk_ids))
-        # Record chunks array for content comparison (first, middle, last, random)
+        # 记录内容比较的chunks数组（第一个、中间、最后一个、随机）
         logging.info("Build document {}: {:.2f}s".format(task_document_name, timer() - start_ts))
         if not chunks:
             progress_callback(1.0, msg=f"No chunk built from {task_document_name}")
@@ -1687,7 +1684,7 @@ async def do_handle_task(task):
         ret = DocumentService.increment_chunk_num(task_doc_id, task_dataset_id, token_count, chunk_count, 0)
         get_recording_context().save_func_return_value("DocumentService.increment_chunk_num", ret)
 
-        # Table parser: push metadata/both column values to document-level metadata for UI / chat filters
+        # 表解析器：将 metadata/both 列值推送到 UI /聊天过滤器的文档级元数据
         if task.get("parser_id", "").lower() == "table":
             eff_pc = merge_table_parser_config_from_kb(task)
             logging.debug(f"[TABLE_META_DEBUG] table post-index: table_column_mode={eff_pc.get('table_column_mode')!r}")
@@ -1707,17 +1704,17 @@ async def do_handle_task(task):
                 try:
                     ret = DocMetadataService.update_document_metadata(task_doc_id, merged)
                     get_recording_context().save_func_return_value("DocMetadataService.update_document_metadata", ret)
-                    logging.debug("[TABLE_META_DEBUG] update_document_metadata succeeded")
+                    logging.debug("[TABLE_META_DEBUG] update_document_metadata 成功")
                 except Exception as ue:
                     logging.error(
-                        "update_document_metadata failed (table parser, doc_id=%s): %s",
+                        "update_document_metadata 失败（表解析器，文档ID=%s）：%s",
                         task_doc_id,
                         ue,
                         exc_info=True,
                     )
             except Exception as e:
                 logging.exception(
-                    "Table parser document metadata aggregation failed (doc_id=%s): %s",
+                    "表解析器文档元数据聚合失败（文档ID=%s）：%s",
                     task_doc_id,
                     e,
                 )
@@ -1770,7 +1767,7 @@ async def handle_task():
     global DONE_TASKS, FAILED_TASKS
     # 单次 handle_task 最多处理一条消息。没有消息时短暂退避并返回，外层主循环会继续创建
     # 下一次消费；因此在 get_message() 打断点会持续命中，并不表示每次都有业务任务。
-    redis_msg, task = await collect() # 从redis获取任务
+    redis_msg, task = await collect()  # 从redis获取任务
     if not task:
         await asyncio.sleep(5)
         return
@@ -1780,24 +1777,24 @@ async def handle_task():
     task_id = task["id"]
     try:
         CURRENT_TASKS[task["id"]] = copy.deepcopy(task)
-        run_mode = os.environ.get("TE_RUN_MODE", "0") # 运行模式
+        run_mode = os.environ.get("TE_RUN_MODE", "0")  # 运行模式
         logging.info(f"TE_RUN_MODE is {run_mode}")
 
-        # Check if dry-run comparison is enabled via environment variable
+        # 检查是否通过环境变量启用了空运行比较
         if run_mode == "1":  # dry run mode - compare, 对比模式: 先执行旧版流程，再以拦截写操作的方式执行新版流程，对比两者结果。主要用于迁移验证，速度较慢。
             set_recording_context(RecordingContext())
-            await do_handle_task(task)  # original execution
-            # dry run mode
+            await do_handle_task(task)  # 原装执行
+            # 试运行模式
             logging.info(f"-----dry run task:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             await TaskManager.dry_run_task(task, get_recording_context(), chat_limiter, minio_limiter, chunk_limiter, embed_limiter, kg_limiter, set_progress, has_canceled)
         elif run_mode == "0":  # use refactor-ed version, 默认模式，使用新版重构后的解析流程
-            # switch to refactor-ed version
+            # 切换到重构版本
             logging.info(f"-----run refactor-ed task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             set_recording_context(NullRecordingContext())
             # TaskManager 只负责装配上下文；真正的普通文档流水线位于
             # TaskHandler._run_standard_chunking_impl()。
             await TaskManager.run_refactored_task(task, chat_limiter, minio_limiter, chunk_limiter, embed_limiter, kg_limiter, set_progress, has_canceled)
-        else:  # original version
+        else:  # 原版
             logging.info(f"-----run original task executor:{task_id}, {task.get('name', '')}, doc id:{task.get('doc_id', '')}")
             set_recording_context(NullRecordingContext())
             await do_handle_task(task)
@@ -1826,9 +1823,9 @@ async def handle_task():
         if not task.get("dataflow_id", ""):
             referred_document_id = None
             if task_type in _KB_FANOUT_TASK_TYPES:
-                # KB-level fan-out tasks store the participating doc list in
-                # task["doc_ids"]; the first entry is used as a referent so
-                # the pipeline operation log has something to anchor to.
+                # KB 级扇出任务将参与文档列表存储在
+                # 任务["doc_ids"];第一个条目用作参考，因此
+                # 管道操作日志有一些可以锚定的内容。
                 referred_document_id = (task.get("doc_ids") or [None])[0]
             ret = PipelineOperationLogService.record_pipeline_operation(
                 document_id=task["doc_id"], pipeline_id="", task_type=pipeline_task_type, task_id=task_id, referred_document_id=referred_document_id
@@ -1841,7 +1838,7 @@ async def handle_task():
 
 
 async def get_server_ip() -> str:
-    # get ip by udp
+    # 通过udp获取ip
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -1852,15 +1849,13 @@ async def get_server_ip() -> str:
 
 
 async def report_status():
-    """
-    Periodically reports the executor's heartbeat
-    """
+    """定期报告执行者的心跳"""
     global PENDING_TASKS, LAG_TASKS, DONE_TASKS, FAILED_TASKS
 
     ip_address = await get_server_ip()
     pid = os.getpid()
 
-    # Register the executor in Redis
+    # 在Redis中注册执行器
     REDIS_CONN.sadd("TASKEXE", CONSUMER_NAME)
     redis_lock = RedisDistributedLock("clean_task_executor", lock_value=CONSUMER_NAME, timeout=60)
 
@@ -1888,7 +1883,7 @@ async def report_status():
             }
         )
 
-        # Report heartbeat to Redis
+        # 向 Redis 报告心跳
         try:
             REDIS_CONN.zadd(CONSUMER_NAME, heartbeat, now_ts)
         except Exception as e:
@@ -1897,13 +1892,13 @@ async def report_status():
             logging.debug(f"{CONSUMER_NAME} reported heartbeat: {heartbeat}")
             pass
 
-        # Clean up own expired heartbeat
+        # 清理自己过期的心跳
         try:
             REDIS_CONN.zremrangebyscore(CONSUMER_NAME, 0, now_ts - 60 * 30)
         except Exception as e:
             logging.warning(f"Failed to clean heartbeat: {e}")
 
-        # Clean other executors
+        # 清理其他执行器
         lock_acquired = False
         try:
             lock_acquired = redis_lock.acquire()
@@ -1942,18 +1937,18 @@ async def task_manager():
 
 
 async def main():
-    # Stagger executor startup to prevent connection storm to Infinity
-    # Extract worker number from CONSUMER_NAME (e.g., "task_executor_abc123_5" -> 5)
+    # 错开执行器启动以防止与 Infinity 的连接风暴
+    # 从CONSUMER_NAME中提取工人编号（e.g.，"task_executor_abc123_5" -> 5）
     try:
         worker_num = int(CONSUMER_NAME.rsplit("_", 1)[-1])
-        # Add random delay: base delay + worker_num * 2.0s + random jitter
-        # This spreads out connection attempts over several seconds
+        # 添加随机延迟：基本延迟 + worker_num * 2.0s + 随机抖动
+        # 这会将连接尝试分散到几秒钟内
         startup_delay = worker_num * 2.0 + random.uniform(0, 0.5)
         if startup_delay > 0:
             logging.info(f"Staggering startup by {startup_delay:.2f}s to prevent connection storm")
             await asyncio.sleep(startup_delay)
     except (ValueError, IndexError):
-        pass  # Non-standard consumer name, skip delay
+        pass  # 非标准消费者名称，跳过延迟
 
     logging.info(r"""
     ____                      __  _
@@ -1995,17 +1990,17 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
         report_task.cancel()
         await asyncio.gather(report_task, return_exceptions=True)
-    logging.error("BUG!!! You should not reach here!!!")
+    logging.error("BUG！！！你不应该到达这里！")
 
 
 if __name__ == "__main__":
-    # Parse command line arguments (consistent with SAAS version)
+    # 解析命令行参数（与SAAS版本一致）
     parser = argparse.ArgumentParser(description="Task Executor")
     parser.add_argument("-i", "--index", type=str, default="0")
     parser.add_argument("-t", "--type", type=str, default="common", help="[common, graphrag, raptor, resume]")
     args = parser.parse_args()
 
-    # Update global variables
+    # 更新全局变量
     TASK_TYPE = args.type
     TE_IDX = args.index
     CONSUMER_NAME = f"task_executor_{TASK_TYPE}_{TE_IDX}"

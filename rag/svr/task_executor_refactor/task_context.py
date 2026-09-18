@@ -13,20 +13,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Task Context Module.
+"""任务上下文模块。
 
-Provides [`TaskContext`](rag/svr/task_executor_refactor/task_context.py) as a typed wrapper
-around the task dictionary, providing convenient property accessors for all
-commonly used task attributes throughout the task executor refactor codebase.
+``TaskContext`` 是原始任务字典的类型化包装，为任务执行器常用字段提供统一属性访问。
+本模块同时定义：原始任务结构 ``TaskDict``、并发限制器 ``TaskLimiters``、回调集合
+``TaskCallbacks``，以及组合这些组件的主入口 ``TaskContext``。
 
-This module defines:
-- [`TaskDict`](rag/svr/task_executor_refactor/task_context.py): TypedDict for the raw task dictionary.
-- [`TaskLimiters`](rag/svr/task_executor_refactor/task_context.py): Dataclass encapsulating all rate limiters.
-- [`TaskCallbacks`](rag/svr/task_executor_refactor/task_context.py): Dataclass encapsulating all callback functions.
-- [`TaskContext`](rag/svr/task_executor_refactor/task_context.py): Main facade combining the above components.
-
-Usage example::
+使用示例：
 
     from rag.svr.task_executor_refactor.task_context import TaskContext, TaskLimiters, TaskCallbacks
 
@@ -47,7 +40,7 @@ Usage example::
         recording_context=recording_context,
     )
 
-    # Access task properties directly
+    # 直接读取任务属性
     task_id = ctx.id
     tenant_id = ctx.tenant_id
     kb_id = ctx.kb_id
@@ -63,64 +56,63 @@ from rag.svr.task_executor_refactor.write_operation_interceptor import WriteOper
 
 
 # ============================================================================
-# Type Definitions
+# 类型定义
 # ============================================================================
 
 
 class TaskDict(TypedDict, total=False):
-    """TypedDict defining the structure of the raw task dictionary.
+    """TypedDict 定义原始任务字典的结构。
 
-    All fields are optional except 'id' and 'tenant_id' which are required.
-    """
+    除了必填的“id”和“tenant_id”之外，所有字段都是可选的。"""
 
     id: Required[str]
-    """Task identifier (required)."""
+    """Task 标识符（必需）。"""
 
     tenant_id: Required[str]
-    """Tenant identifier (required)."""
+    """租户标识符（必填）。"""
 
     kb_id: str
-    """Knowledge base / dataset identifier."""
+    """知识库/数据集标识符。"""
 
     doc_id: str
-    """Document identifier."""
+    """Document 标识符。"""
 
     doc_ids: List[str]
-    """List of document identifiers (for batch tasks like RAPTOR/GraphRAG)."""
+    """文档标识符列表（适用于 RAPTOR/GraphRAG 等批处理任务）。"""
 
     name: str
-    """Document name."""
+    """Document 名称。"""
 
     location: str
-    """Document location/path."""
+    """文档在对象存储中的位置或路径。"""
 
     size: int
-    """Document file size in bytes."""
+    """Document 文件大小（以字节为单位）。"""
 
     parser_id: str
-    """Parser identifier (e.g., 'naive', 'table', 'paper')."""
+    """解析器标识符（e.g.、'naive'、'table'、'paper'）。"""
 
     parser_config: Dict[str, Any]
-    """Document-level parser configuration."""
+    """Document 级解析器配置。"""
 
     kb_parser_config: Dict[str, Any]
 
-    """Knowledge base level parser configuration."""
+    """知识库级别解析器配置。"""
 
     language: str
-    """Document language (e.g., 'en', 'zh')."""
+    """Document语言（e.g.、'en'、'zh'）。"""
 
     llm_id: str
-    """LLM model identifier."""
+    """LLM 型号标识符。"""
 
     tenant_llm_id: str | None
-    """Tenant model ID for LLM (id in tenant_model table)."""
+    """LLM 的租户模型 ID（tenant_model 表中的 ID）。"""
 
     embd_id: str
-    """Embedding model identifier."""
+    """Embedding 型号标识符。"""
 
     tenant_embd_id: str | None
-    """Tenant model ID for embedding (id in tenant_model table)."""
+    """用于嵌入的租户模型 ID（tenant_model 表中的 id）。"""
 
     from_page: int
     """起始页/行，0-based 且包含；table parser 中表示起始行。"""
@@ -132,95 +124,93 @@ class TaskDict(TypedDict, total=False):
     """任务分流类型；空字符串通常是普通文档解析，dataflow/raptor/graphrag 等进入专用分支。"""
 
     dataflow_id: str
-    """Dataflow/pipeline identifier."""
+    """Dataflow/pipeline 标识符。"""
 
     pagerank: int
-    """PageRank value for document scoring."""
+    """PageRank 文档评分值。"""
 
     file: Any
-    """File object for dataflow processing."""
+    """File 用于数据流处理的对象。"""
 
     memory_id: str
-    """Memory identifier for memory tasks."""
+    """Memory 内存任务标识符。"""
 
     source_id: str
-    """Source identifier for memory tasks."""
+    """内存任务的源标识符。"""
 
     message_dict: Dict[str, Any]
-    """Message dictionary for memory tasks."""
+    """内存任务的消息字典。"""
 
 
 # ============================================================================
-# Data Classes
+# 数据类
 # ============================================================================
 
 
 @dataclass
 class TaskLimiters:
-    """Encapsulates all rate limiters for task execution.
+    """封装任务执行的所有速率限制器。
 
-    Each limiter is an asyncio.Semaphore used to control concurrency
-    for different types of operations.
-    """
+    每个限制器都是一个asyncio.Semaphore，用于控制并发
+    用于不同类型的操作。"""
 
     chat: asyncio.Semaphore = None
-    """Asyncio semaphore for chat model rate limiting."""
+    """用于聊天模型速率限制的异步信号量。"""
 
     minio: asyncio.Semaphore = None
-    """Asyncio semaphore for MinIO rate limiting."""
+    """用于 MinIO 速率限制的异步信号量。"""
 
     chunk: asyncio.Semaphore = None
-    """Asyncio semaphore for chunk building rate limiting."""
+    """用于块构建速率限制的异步信号量。"""
 
     embed: asyncio.Semaphore = None
-    """Asyncio semaphore for embedding rate limiting."""
+    """用于嵌入速率限制的异步信号量。"""
 
     kg: asyncio.Semaphore = None
-    """Asyncio semaphore for knowledge graph rate limiting."""
+    """用于知识图速率限制的异步信号量。"""
 
 
 def _noop_progress(**kwargs: Any) -> None:
-    """No-op progress callback."""
+    """无操作进度回调。"""
     pass
 
 
 def _not_canceled(task_id: str) -> bool:
-    """Default cancellation check - always returns False."""
+    """默认取消检查 - 始终返回 False。"""
     return False
 
 
 @dataclass
 class TaskCallbacks:
-    """Encapsulates all callback functions for task execution."""
+    """封装任务执行的所有回调函数。"""
 
     progress: Callable = field(default_factory=lambda: _noop_progress)
-    """Callback function for progress updates (raw, requires task_id, from_page, to_page)."""
+    """进度更新回调函数（原始，需要 task_id、from_page、to_page）。"""
 
     has_canceled: Callable = field(default_factory=lambda: _not_canceled)
-    """Function to check if task is canceled."""
+    """检查任务是否被取消的函数。"""
 
 
 # ============================================================================
-# Main Class
+# 主类
 # ============================================================================
 
 
 class TaskContext:
-    """Typed wrapper around the task dictionary providing convenient property accessors.
+    """围绕任务字典的类型包装器，提供方便的属性访问器。
 
-    This class uses composition to encapsulate:
-    1. The raw task dictionary (TaskDict)
-    2. Execution limiters (TaskLimiters)
-    3. Callback functions (TaskCallbacks)
-    4. Optional write operation interceptor
-    5. Optional recording context for intermediate results
+    该类使用组合来封装：
+    1.原始任务字典（TaskDict）
+    2. 执行限制器（TaskLimiters）
+    3.回调函数（TaskCallbacks）
+    4.可选的写操作拦截器
+    5. 中间结果的可选记录上下文
 
-    The properties provide a clean interface for accessing task attributes
-    without needing to use dictionary access with string keys throughout
-    the codebase.
-    """
+    这些属性提供了一个用于访问任务属性的干净接口
+    无需在整个过程中使用带有字符串键的字典访问
+    代码库。"""
 
-    # Default values for optional task fields
+    # 可选任务字段的默认值
     _DEFAULTS: Dict[str, Any] = {
         "kb_id": "",
         "doc_id": "",
@@ -254,20 +244,19 @@ class TaskContext:
         write_interceptor: WriteOperationInterceptor = None,
         recording_context: BaseRecordingContext = None,
     ):
-        """Initialize TaskContext.
+        """初始化TaskContext。
 
-        Args:
-            task: The raw task dictionary containing all task attributes.
-            limiters: TaskLimiters dataclass containing all rate limiters.
-            callbacks: TaskCallbacks dataclass containing all callback functions.
-            write_interceptor: Optional interceptor for write operations.
-            recording_context: Optional BaseRecordingContext for intermediate result
-                capture. Must be injected via constructor.
+        参数：
+            任务：包含所有任务属性的原始任务字典。
+            限制器：TaskLimiters 数据类包含所有速率限制器。
+            回调：包含所有回调函数的 TaskCallbacks 数据类。
+            write_interceptor：写操作的可选拦截器。
+            recording_context：中间结果可选 BaseRecordingContext
+                捕获。必须通过构造函数注入。
 
-        Raises:
-            ValueError: If required fields ('id', 'tenant_id') are missing from task.
-        """
-        # Validate required fields
+        加薪：
+            ValueError：如果任务中缺少必填字段（“id”、“tenant_id”）。"""
+        # 验证必填字段
         if "id" not in task:
             raise ValueError("Task must contain 'id'")
         if "tenant_id" not in task:
@@ -279,7 +268,7 @@ class TaskContext:
         self._write_interceptor = write_interceptor
         self._recording_context = recording_context
 
-        # Prepare progress callback and set it on the context
+        # 准备进度回调并将其设置在上下文中
         progress_cb = partial(
             callbacks.progress,
             self.id,
@@ -289,250 +278,247 @@ class TaskContext:
         self._progress_cb = progress_cb
 
     # =========================================================================
-    # Core task identity properties
+    # 核心任务身份属性
     # =========================================================================
 
     @property
     def id(self) -> str:
-        """Task identifier."""
+        """Task 标识符。"""
         return self._task["id"]
 
     @property
     def tenant_id(self) -> str:
-        """Tenant identifier."""
+        """租户标识符。"""
         return self._task["tenant_id"]
 
     @property
     def kb_id(self) -> str:
-        """Knowledge base / dataset identifier."""
+        """知识库/数据集标识符。"""
         return self._task.get("kb_id", self._DEFAULTS["kb_id"])
 
     @property
     def doc_id(self) -> str:
-        """Document identifier."""
+        """Document 标识符。"""
         return self._task.get("doc_id", self._DEFAULTS["doc_id"])
 
     @property
     def doc_ids(self) -> List[str]:
-        """List of document identifiers (for batch tasks like RAPTOR/GraphRAG)."""
+        """文档标识符列表（适用于 RAPTOR/GraphRAG 等批处理任务）。"""
         return self._task.get("doc_ids", list(self._DEFAULTS["doc_ids"]))
 
     # =========================================================================
-    # Document metadata properties
+    # Document 元数据属性
     # =========================================================================
 
     @property
     def name(self) -> str:
-        """Document name."""
+        """Document 名称。"""
         return self._task.get("name", self._DEFAULTS["name"])
 
     @property
     def location(self) -> str:
-        """Document location/path."""
+        """文档在对象存储中的位置或路径。"""
         return self._task.get("location", self._DEFAULTS["location"])
 
     @property
     def size(self) -> int:
-        """Document file size in bytes."""
+        """Document 文件大小（以字节为单位）。"""
         return self._task.get("size", self._DEFAULTS["size"])
 
     # =========================================================================
-    # Parser configuration properties
+    # 解析器配置属性
     # =========================================================================
 
     @property
     def parser_id(self) -> str:
-        """Parser identifier (e.g., 'naive', 'table', 'paper')."""
+        """解析器标识符（e.g.、'naive'、'table'、'paper'）。"""
         return self._task.get("parser_id", self._DEFAULTS["parser_id"])
 
     @property
     def parser_config(self) -> Dict[str, Any]:
-        """Document-level parser configuration."""
+        """Document 级解析器配置。"""
         return self._task.get("parser_config", {})
 
     @property
     def kb_parser_config(self) -> Dict[str, Any]:
-        """Knowledge base level parser configuration."""
+        """知识库级别解析器配置。"""
         return self._task.get("kb_parser_config", {})
 
     # =========================================================================
-    # Language and model properties
+    # 语言和模型属性
     # =========================================================================
 
     @property
     def language(self) -> str:
-        """Document language (e.g., 'en', 'zh')."""
+        """Document 语言（e.g., 'en', 'zh'）。"""
         return self._task.get("language", self._DEFAULTS["language"])
 
     @property
     def llm_id(self) -> str:
-        """LLM model identifier."""
+        """LLM 型号标识符。"""
         return self._task.get("llm_id", self._DEFAULTS["llm_id"])
 
     @property
     def tenant_llm_id(self) -> str | None:
-        """Tenant model ID for LLM (id in tenant_model table)."""
+        """LLM 的租户模型 ID（tenant_model 表中的 ID）。"""
         return self._task.get("tenant_llm_id", self._DEFAULTS["tenant_llm_id"]) or None
 
     @property
     def embd_id(self) -> str:
-        """Embedding model identifier."""
+        """Embedding 型号标识符。"""
         return self._task.get("embd_id", self._DEFAULTS["embd_id"])
 
     @property
     def tenant_embd_id(self) -> str | None:
-        """Tenant model ID for embedding (id in tenant_model table)."""
+        """用于嵌入的租户模型 ID（tenant_model 表中的 id）。"""
         return self._task.get("tenant_embd_id", self._DEFAULTS["tenant_embd_id"]) or None
 
     # =========================================================================
-    # Page range properties
+    # 页面范围属性
     # =========================================================================
 
     @property
     def from_page(self) -> int:
-        """Starting page number for processing (0-based)."""
+        """处理的起始页码（从 0 开始）。"""
         return self._task.get("from_page", self._DEFAULTS["from_page"])
 
     @property
     def to_page(self) -> int:
-        """Ending page number for processing (-1 means all pages)."""
+        """处理的结束页码（-1 表示所有页）。"""
         return self._task.get("to_page", self._DEFAULTS["to_page"])
 
     # =========================================================================
-    # Task type and routing properties
+    # Task 类型和路由属性
     # =========================================================================
 
     @property
     def task_type(self) -> str:
-        """Task type (e.g., 'dataflow', 'raptor', 'graphrag', 'memory')."""
+        """Task 类型（e.g.、“数据流”、“猛禽”、“graphrag”、“内存”）。"""
         return self._task.get("task_type", self._DEFAULTS["task_type"])
 
     @property
     def dataflow_id(self) -> str:
-        """Dataflow/pipeline identifier."""
+        """Dataflow/pipeline 标识符。"""
         return self._task.get("dataflow_id", self._DEFAULTS["dataflow_id"])
 
     # =========================================================================
-    # Additional properties
+    # 其他属性
     # =========================================================================
 
     @property
     def pagerank(self) -> int:
-        """PageRank value for document scoring."""
+        """PageRank 文档评分值。"""
         return self._task.get("pagerank", self._DEFAULTS["pagerank"])
 
     @property
     def file(self) -> Optional[Any]:
-        """File object for dataflow processing."""
+        """File 用于数据流处理的对象。"""
         return self._task.get("file")
 
     # =========================================================================
-    # Memory task specific properties
+    # Memory 任务特定属性
     # =========================================================================
 
     @property
     def memory_id(self) -> str:
-        """Memory identifier for memory tasks."""
+        """Memory 内存任务标识符。"""
         return self._task.get("memory_id", self._DEFAULTS["memory_id"])
 
     @property
     def source_id(self) -> str:
-        """Source identifier for memory tasks."""
+        """内存任务的源标识符。"""
         return self._task.get("source_id", self._DEFAULTS["source_id"])
 
     @property
     def message_dict(self) -> Dict[str, Any]:
-        """Message dictionary for memory tasks."""
+        """内存任务的消息字典。"""
         return self._task.get("message_dict", {})
 
     # =========================================================================
-    # Raw task dictionary access
+    # 原始任务字典访问
     # =========================================================================
 
     @property
     def raw_task(self) -> Dict[str, Any]:
-        """Return the raw task dictionary."""
+        """返回原始任务字典。"""
         return self._task
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get a value from the task dictionary with a default.
+        """从任务字典中获取一个默认值。
 
-        Args:
-            key: The key to look up.
-            default: Default value if key is not found.
+        参数：
+            key：查找键。
+            default：如果未找到密钥，则使用默认值。
 
-        Returns:
-            The value associated with the key, or default if not found.
-        """
+        返回：
+            与键关联的值，如果未找到，则为默认值。"""
         return self._task.get(key, default)
 
     # =========================================================================
-    # Limiter properties (proxies to TaskLimiters dataclass)
+    # 限制器属性（TaskLimiters 数据类的代理）
     # =========================================================================
 
     @property
     def chat_limiter(self) -> asyncio.Semaphore:
-        """Asyncio semaphore for chat model rate limiting."""
+        """用于聊天模型速率限制的异步信号量。"""
         return self.limiters.chat or asyncio.Semaphore(1)
 
     @property
     def minio_limiter(self) -> asyncio.Semaphore:
-        """Asyncio semaphore for MinIO rate limiting."""
+        """用于 MinIO 速率限制的异步信号量。"""
         return self.limiters.minio or asyncio.Semaphore(1)
 
     @property
     def chunk_limiter(self) -> asyncio.Semaphore:
-        """Asyncio semaphore for chunk building rate limiting."""
+        """用于块构建速率限制的异步信号量。"""
         return self.limiters.chunk or asyncio.Semaphore(1)
 
     @property
     def embed_limiter(self) -> asyncio.Semaphore:
-        """Asyncio semaphore for embedding rate limiting."""
+        """用于嵌入速率限制的异步信号量。"""
         return self.limiters.embed or asyncio.Semaphore(1)
 
     @property
     def kg_limiter(self) -> asyncio.Semaphore:
-        """Asyncio semaphore for knowledge graph rate limiting."""
+        """用于知识图速率限制的异步信号量。"""
         return self.limiters.kg or asyncio.Semaphore(1)
 
     # =========================================================================
-    # Context and interceptor properties
+    # 上下文和拦截器属性
     # =========================================================================
 
     @property
     def recording_context(self) -> BaseRecordingContext:
-        """BaseRecordingContext for this task.
+        """BaseRecordingContext 用于此任务。
 
-        Must be injected via constructor. Raises RuntimeError if accessed
-        before initialization or if no context was provided.
-        """
+        必须通过构造函数注入。如果访问则引发 RuntimeError
+        在初始化之前或如果未提供上下文。"""
         if self._recording_context is None:
             raise RuntimeError("recording_context accessed but not injected into TaskContext")
         return self._recording_context
 
     @property
     def write_interceptor(self) -> WriteOperationInterceptor:
-        """Write operation interceptor for comparison mode."""
+        """比较模式的写操作拦截器。"""
         return self._write_interceptor
 
     # =========================================================================
-    # Callback properties (proxies to TaskCallbacks dataclass)
+    # 回调属性（TaskCallbacks 数据类的代理）
     # =========================================================================
 
     @property
     def has_canceled_func(self) -> Callable:
-        """Function to check if task is canceled."""
+        """检查任务是否被取消的函数。"""
         return self.callbacks.has_canceled
 
     # =========================================================================
-    # Pre-bound progress callback
+    # 预绑定进度回调
     # =========================================================================
 
     @property
     def progress_cb(self) -> Callable:
-        """Pre-bound progress callback (task_id, from_page, to_page already bound).
+        """预绑定进度回调（task_id、from_page、to_page 已绑定）。
 
-        Use this property in services for progress updates.
-        Falls back to progress_callback if progress_cb is not set.
-        """
+        在服务中使用此属性来更新进度。
+        如果未设置 progress_cb，则回退到 progress_callback。"""
         return self._progress_cb

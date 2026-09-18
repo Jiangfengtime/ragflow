@@ -13,24 +13,19 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Task Handler Module.
+"""Task 处理程序模块。
 
-Provides [`TaskHandler`](rag/svr/task_executor_refactor/task_handler.py:56) as the main entry point
-for handling document processing tasks with refactored, testable methods.
-"""
+提供[`TaskHandler`](rag/svr/task_executor_refactor/task_handler.py:56)作为主入口点
+用于使用重构的、可测试的方法处理文档处理任务。"""
 
 import asyncio
 import logging
 import json
 
-# Wiki / artifact compilation pipeline lives in
-# ``rag.svr.task_executor_refactor.dataset_wiki_generator`` — see the
-# ``task_type == "artifact"`` branch of ``TaskHandler.run`` for the
-# dispatch call.
-# Document-structure compilation helpers (CHAIN_KINDS,
-# compile_structure_from_text, merge_compiled_structures,
-# validate_and_correct_chain) moved to ``chunk_post_processor``.
+# Wiki/工件编译流水线位于 ``dataset_wiki_generator``；其调度入口是
+# ``TaskHandler.run`` 中的 ``task_type == "artifact"`` 分支。
+# 文档结构编译辅助函数（CHAIN_KINDS、compile_structure_from_text、
+# merge_compiled_structures、validate_and_correct_chain）位于 ``chunk_post_processor``。
 import xxhash
 
 from timeit import default_timer as timer
@@ -68,10 +63,9 @@ from common import settings
 
 
 def _parser_config_compilation_template_ids(parser_config, tenant_id: str) -> list[str]:
-    """Resolve a doc's parser_config to compile-template ids by
-    looking up configured groups. Returns ``[]`` if the doc has no
-    group set or no group can be resolved.
-    """
+    """解析文档的 parser_config 来编译模板 ID
+    查找配置的组。如果文档没有，则返回“`[]`”
+    组设置或无组都可以解决。"""
     from rag.svr.task_executor_refactor.chunk_post_processor import (
         _parser_config_compilation_template_group_ids,
     )
@@ -87,46 +81,44 @@ def _parser_config_compilation_template_ids(parser_config, tenant_id: str) -> li
     return template_ids
 
 
-# Document-structure compilation tunables
+# Document-结构编译可调参数
 # (DOC_STRUCTURE_COMPILE_BATCH_CHUNKS, DOC_STRUCTURE_MERGE_MAX_DOCS,
-# STRUCTURE_CHAIN_CORRECTION_TIMEOUT_S) moved to
+# STRUCTURE_CHAIN_CORRECTION_TIMEOUT_S) 移至
 # ``chunk_post_processor``.
 
-# Wiki / artifact tunables (``WIKI_MAP_BATCH_CHUNKS``,
-# ``WIKI_GRAPH_MAX_CHUNK_IDS_PER_NODE``, commit-title / comments
-# templates) moved to ``dataset_wiki_generator``.
+# Wiki / 工件可调参数（``WIKI_MAP_BATCH_CHUNKS``，
+# ``WIKI_GRAPH_MAX_CHUNK_IDS_PER_NODE``，提交标题/评论
+# 模板）移至“`dataset_wiki_generator`”。
 
-# The corpus → skill compilation pipeline lives in
-# ``rag.svr.task_executor_refactor.dataset_skill_generator``. Its entry
-# point is :func:`run_corpus2skill`; this handler invokes it from the
-# ``task_type == "skill"`` branch of ``run`` below.
+# 语料库→技能编译管道位于
+# ``rag.svr.task_executor_refactor.dataset_skill_generator``。它的条目
+# 点是 :func:`run_corpus2skill`;该处理程序从
+# ``task_type == "skill"`` branch of ``run``如下。
 
 
 class TaskHandler:
-    """Main task handler for document processing.
+    """文档处理的主要任务处理程序。
 
-    This class orchestrates the entire document processing pipeline:
-    1. Task type detection (memory, dataflow, raptor, graphrag, standard)
-    2. Model binding (embedding, chat)
-    3. Chunk building or RAPTOR/GraphRAG execution
-    4. Embedding
-    5. Indexing
-    6. Post-processing (TOC, table metadata)
+    此类协调整个文档处理管道：
+    1. Task类型检测（内存、数据流、raptor、graphrag、standard）
+    2.模型绑定（嵌入、聊天）
+    3、Chunk构建或RAPTOR/GraphRAG执行
+    4.Embedding
+    5. 索引
+    6.后处理（TOC，表元数据）
 
-    All intermediate results are recorded via RecordingContext for comparison.
-    """
+    所有中间结果均通过RecordingContext记录以供比较。"""
 
     def __init__(
         self,
         ctx: TaskContext,
         billing_hook: Optional[BillingHook] = None,
     ):
-        """Initialize TaskHandler.
+        """初始化TaskHandler。
 
-        Args:
-            ctx: TaskContext containing task configuration and execution resources.
-            billing_hook: Optional billing hook for pipeline success/error callbacks.
-        """
+        参数：
+            ctx: TaskContext 包含任务配置和执行资源。
+            billing_hook：管道 success/error 回调的可选计费挂钩。"""
         self._task_context = ctx
         self._billing_hook = billing_hook
 
@@ -152,7 +144,7 @@ class TaskHandler:
     # 真正的处理入口
     async def handle_task(self) -> None:
         try:
-            await self.handle() # 进入新版解析实现
+            await self.handle()  # 进入新版解析实现
         except Exception:
             if self._is_standard_chunking_task(self._task_context.task_type):
                 abort_doc_chunking_counter(self._task_context.doc_id)
@@ -190,7 +182,7 @@ class TaskHandler:
         task_id = ctx.id
 
         logging.info(
-            "task_pipeline_started task_id=%s doc_id=%s kb_id=%s task_type=%s parser_id=%s page_range=[%s,%s)",
+            "任务处理流水线已开始 任务ID=%s 文档ID=%s 知识库ID=%s 任务类型=%s 解析器ID=%s 页面范围=[%s,%s)",
             task_id,
             ctx.doc_id,
             ctx.kb_id,
@@ -200,13 +192,13 @@ class TaskHandler:
             ctx.to_page,
         )
 
-        # Handle memory tasks
+        # 处理内存任务
         if task_type == "memory":
-            # ignore when it's dry run - no change on handle_save_to_memory_task when refactor
+            # 在空运行时忽略 - 重构时 handle_save_to_memory_task 没有变化
             if isinstance(ctx.write_interceptor, RecordingContext):
                 logging.info(f"dry run, ignore handle_save_to_memory_task {task_id}")
             else:
-                # actual run - not dry run
+                # 实际运行-非空运行
                 await handle_save_to_memory_task(ctx.raw_task)
             return
 
@@ -216,7 +208,7 @@ class TaskHandler:
             return
 
         # Language defaults to "Chinese" via TaskContext._DEFAULTS 鈥?safe to bind model directly.
-        # Bind embedding model (matching original do_handle_task order: bind + init_kb before routing)
+        # Bind嵌入模型（匹配原始do_handle_task顺序：路由前bind + init_kb）
         # 绑定 Embedding 模型
         result = await self._bind_embedding_model()
         if result is None:
@@ -226,9 +218,9 @@ class TaskHandler:
         with embedding_model:
             # 索引按 tenant_id 命名、按 kb_id 过滤；向量维度来自实际 Embedding 探测结果。
             # _init_kb 只创建/校验索引及 mapping，不会在这里写入任何 Chunk。
-            self._init_kb(vector_size) # 在解析文档前，确保当前租户对应的文档索引已经存在。
+            self._init_kb(vector_size)  # 在解析文档前，确保当前租户对应的文档索引已经存在。
 
-            # Handle dataflow tasks (after init_kb, matching original behavior)
+            # 处理数据流任务（在init_kb之后，匹配原始行为）
             if task_type == "dataflow" and ctx.doc_id == CANVAS_DEBUG_DOC_ID:
                 await self._run_dataflow()
                 return
@@ -237,7 +229,7 @@ class TaskHandler:
                 await self._run_dataflow()
                 return
 
-            # Route to appropriate handler
+            # 路由至适当的处理程序
             from rag.svr.task_executor_refactor.dataset_structure_merger import (
                 is_structure_merge_task,
             )
@@ -253,7 +245,7 @@ class TaskHandler:
                     run_wiki_incremental,
                 )
 
-                # Parse the Wiki mode from the template config.
+                # 从模板配置中解析 Wiki 模式。
                 wiki_mode = None
                 try:
                     from api.db.services.compilation_template_service import (
@@ -309,13 +301,13 @@ class TaskHandler:
         ctx = self._task_context
         # 同一租户的多个知识库通常共享 ragflow_{tenant_id} 索引，Chunk 再通过 kb_id 隔离；
         # create_idx 内部会处理“已存在”情况，因此每个 Task 进入这里不会重复创建数据。
-        idxnm = search.index_name(ctx.tenant_id) # 根据租户 ID 生成索引名
+        idxnm = search.index_name(ctx.tenant_id)  # 根据租户 ID 生成索引名
         parser_id = ctx.parser_id
-        # Create index if not exists
-        settings.docStoreConn.create_idx(idxnm, ctx.kb_id, vector_size, parser_id) # 创建索引
+        # 如果不存在则创建索引
+        settings.docStoreConn.create_idx(idxnm, ctx.kb_id, vector_size, parser_id)  # 创建索引
 
     async def _run_dataflow(self) -> None:
-        """Run dataflow pipeline."""
+        """运行数据流管道。"""
         dataflow_service = DataflowService(
             ctx=self._task_context,
             billing_hook=self._billing_hook,
@@ -323,26 +315,25 @@ class TaskHandler:
         await dataflow_service.run_dataflow()
 
     async def _run_evaluation(self) -> None:
-        """Run evaluation task."""
+        """运行评估任务。"""
         ctx = self._task_context
         ctx.progress_cb(1, "Evaluation task placeholder")
 
     async def _run_reembedding(self) -> None:
-        """Run reembedding task."""
+        """运行重新嵌入任务。"""
         ctx = self._task_context
         ctx.progress_cb(1, "Reembedding task placeholder")
 
     async def _run_clone(self) -> None:
-        """Run clone task."""
+        """运行克隆任务。"""
         ctx = self._task_context
         ctx.progress_cb(1, "Clone task placeholder")
 
     async def _bind_embedding_model(self) -> Optional[tuple]:
-        """Bind embedding model to task.
+        """将嵌入模型绑定到任务。
 
-        Returns:
-            Tuple of (embedding_model, vector_size) on success, or None on failure.
-        """
+        返回：
+            成功时为 (embedding_model、vector_size) 元组，失败时为 None。"""
         ctx = self._task_context
         task_tenant_id = ctx.tenant_id
         task_embedding_id = ctx.embd_id
@@ -354,7 +345,7 @@ class TaskHandler:
                     embd_model_config = get_model_config_by_id(task_tenant_id, LLMType.EMBEDDING, ctx.tenant_embd_id)
                 except LookupError:
                     embd_model_config = resolve_model_config(task_tenant_id, LLMType.EMBEDDING, task_embedding_id)
-            elif task_embedding_id: # 根据embedding_id获取模型配置
+            elif task_embedding_id:  # 根据向量模型 ID 获取模型配置。
                 embd_model_config = resolve_model_config(task_tenant_id, LLMType.EMBEDDING, task_embedding_id)
             else:
                 embd_model_config = get_tenant_default_model_by_type(task_tenant_id, LLMType.EMBEDDING)
@@ -373,7 +364,7 @@ class TaskHandler:
         vector_size: int,
         mark_done: bool = True,
     ) -> None:
-        """Run RAPTOR summary generation."""
+        """运行 RAPTOR 摘要生成。"""
         ctx = self._task_context
         task_tenant_id = ctx.tenant_id
         task_dataset_id = ctx.kb_id
@@ -409,10 +400,10 @@ class TaskHandler:
                 ctx.progress_cb(prog=-1.0, msg="Internal error: Invalid RAPTOR configuration")
                 return
 
-        # Bind LLM for raptor
+        # 猛禽绑定 LLM
         chat_model_config = resolve_model_config(task_tenant_id, LLMType.CHAT, kb_task_llm_id)
         with LLMBundle(task_tenant_id, chat_model_config, lang=ctx.language) as chat_model:
-            # Run RAPTOR
+            # 运行 RAPTOR
             raptor_service = RaptorService(ctx=ctx)
 
             async with ctx.kg_limiter:
@@ -427,17 +418,17 @@ class TaskHandler:
             ctx.recording_context.record("raptor_chunks", chunks)
             ctx.recording_context.record("raptor_token_count", token_count)
 
-            # Insert RAPTOR chunks
+            # 插入 RAPTOR 块
             if chunks:
                 task_doc_id = (ctx.doc_ids or [ctx.doc_id] or [GRAPH_RAPTOR_FAKE_DOC_ID])[0]
                 chunk_service = ChunkService(ctx=ctx)
-                insert_result = await chunk_service.insert_chunks(ctx.id, task_tenant_id, task_dataset_id, chunks) # 写入chunk
+                insert_result = await chunk_service.insert_chunks(ctx.id, task_tenant_id, task_dataset_id, chunks)  # 写入chunk
                 if insert_result:
                     ctx.recording_context.record("insertion_result", "success")
                 else:
                     ctx.recording_context.record("insertion_result", "failed")
 
-                # Cleanup stale RAPTOR chunks
+                # 清理陈旧的 RAPTOR 块
                 cleaned_chunks = 0
                 for cleanup_doc_id, keep_method in raptor_cleanup_chunks:
                     ret = await self._delete_raptor_chunks(cleanup_doc_id, task_tenant_id, task_dataset_id, keep_method)
@@ -446,27 +437,27 @@ class TaskHandler:
                 if cleaned_chunks:
                     ctx.progress_cb(msg=f"Cleaned up {cleaned_chunks} stale RAPTOR chunks.")
 
-                # Build the per-doc RAPTOR tree graph from the just-
-                # inserted summaries. Each chunk in ``chunks`` carries
-                # the doc_id it was written under (real doc id for
-                # scope="file"; GRAPH_RAPTOR_FAKE_DOC_ID for the
-                # dataset-scope path). We materialize one graph row per
-                # distinct doc_id so the dataset structure-graph
-                # endpoint can surface a RAPTOR tab per document.
-                # Failure here is best-effort — the summaries are
-                # already persisted; the tab just won't render.
+                # 从刚刚构建的每个文档 RAPTOR 树图
+                # 插入摘要。 ``chunks`` 中的每个块都携带
+                # doc_id 它是在下面编写的（真实的文档ID
+                # 范围="file"; GRAPH_RAPTOR_FAKE_DOC_ID 为
+                # 数据集范围路径）。我们将每个图行具体化为
+                # 与 doc_id 不同，因此数据集结构图
+                # 端点可以为每个文档显示一个 RAPTOR 选项卡。
+                # 这里的失败是尽力而为——总结是
+                # 已经坚持了；该选项卡不会呈现。
                 raptor_doc_ids = {str(c.get("doc_id")) for c in chunks if c.get("doc_id")}
                 for raptor_doc_id in raptor_doc_ids:
                     try:
                         await raptor_service._persist_raptor_graph_to_es(raptor_doc_id)
                     except Exception:
                         logging.exception(
-                            "raptor_graph: build failed for kb=%s doc=%s",
+                            "raptor_graph：kb = %s doc = %s 构建失败",
                             task_dataset_id,
                             raptor_doc_id,
                         )
 
-                # Update document stats
+                # 更新文档统计信息
                 if ctx.write_interceptor:
                     ctx.write_interceptor.intercept("DocumentService.increment_chunk_num")
                 else:
@@ -477,7 +468,7 @@ class TaskHandler:
                 ctx.progress_cb(prog=1.0, msg="RAPTOR done")
 
     async def _run_graphrag(self, embedding_model: LLMBundle) -> None:
-        """Run GraphRAG."""
+        """运行GraphRAG。"""
         ctx = self._task_context
         task_tenant_id = ctx.tenant_id
         task_dataset_id = ctx.kb_id
@@ -565,7 +556,7 @@ class TaskHandler:
         embedding_model: LLMBundle,
         vector_size: int,
     ) -> None:
-        """Run standard chunking pipeline."""
+        """运行标准分块管道。"""
         ctx = self._task_context
         task_id = ctx.id
         task_tenant_id = ctx.tenant_id
@@ -580,7 +571,7 @@ class TaskHandler:
         doc_task_llm_id = ctx.parser_config.get("llm_id") or ctx.llm_id
         ctx.raw_task["llm_id"] = doc_task_llm_id
 
-        # Build chunks
+        # 构建块
         start_ts = timer()
         chunk_service = ChunkService(ctx=ctx)
 
@@ -601,7 +592,7 @@ class TaskHandler:
         # build_chunks 返回的是尚未生成向量、尚未写入 ES 的内存对象。
         chunks = await chunk_service.build_chunks(binary, on_chunking_start)
         logging.info(
-            "task_chunks_built task_id=%s doc_id=%s chunk_count=%d",
+            "文档切片已生成 任务ID=%s 文档ID=%s 切片数量=%d",
             task_id,
             task_doc_id,
             len(chunks),
@@ -629,7 +620,7 @@ class TaskHandler:
 
         ctx.progress_cb(msg="Generate {} chunks".format(len(chunks)))
 
-        # Embed chunks
+        # 嵌入块
         start_ts = timer()
         embedding_service = EmbeddingService(ctx=ctx)
         try:
@@ -645,7 +636,7 @@ class TaskHandler:
             raise
 
         logging.info(
-            "task_embedding_completed task_id=%s doc_id=%s chunk_count=%d token_count=%d vector_size=%d",
+            "向量生成完成 任务ID=%s 文档ID=%s 切片数量=%d 令牌数量=%d 向量维度=%d",
             task_id,
             task_doc_id,
             len(chunks),
@@ -663,7 +654,7 @@ class TaskHandler:
         if ctx.parser_id.lower() == "naive" and ctx.parser_config.get("toc_extraction", False):
             toc_thread = asyncio.create_task(asyncio.to_thread(self._build_toc, ctx, chunks, ctx.progress_cb))
 
-        # Insert chunks
+        # 插入块
         chunk_count = len(set([chunk["id"] for chunk in chunks]))
         start_ts = timer()
 
@@ -684,7 +675,7 @@ class TaskHandler:
             return
         ctx.recording_context.record("insertion_result", "success")
         logging.info(
-            "task_chunks_indexed task_id=%s doc_id=%s kb_id=%s chunk_count=%d",
+            "文档切片已写入检索存储 任务ID=%s 文档ID=%s 知识库ID=%s 切片数量=%d",
             task_id,
             task_doc_id,
             task_dataset_id,
@@ -693,7 +684,7 @@ class TaskHandler:
 
         # ES 已写成功后处理表格元数据；TOC 解析可与 Embedding/索引并行，完成后作为独立
         # TOC Chunk 再写入 doc store。普通 Chunk 的主写入不会等待 TOC 生成才开始。
-        # Post-processing
+        # 后处理
         post_processor = PostProcessor(ctx=ctx)
         await post_processor.process_table_parser_metadata(task_doc_id, chunks)
 
@@ -711,10 +702,10 @@ class TaskHandler:
 
         # Task.progress/chunk_ids 与 Document.chunk_num/token_num 是两层状态：前者描述当前分页
         # Task，后者累加整份文档统计；一个 PDF 的多个 Task 都会贡献到同一 Document。
-        # Update document stats
+        # 更新文档统计信息
         if ctx.write_interceptor:
             ctx.write_interceptor.intercept("DocumentService.increment_chunk_num")
-        else: # 更新 Document 的 Chunk 数和 Token 数
+        else:  # 更新 Document 的 Chunk 数和 Token 数
             DocumentService.increment_chunk_num(task_doc_id, task_dataset_id, token_count, chunk_count, 0)
 
         if not await self._run_document_post_chunking_if_last(
@@ -740,9 +731,8 @@ class TaskHandler:
         chunks_len: int,
         token_count: int,
     ) -> bool:
-        """Thin delegator. The pipeline lives in
-        ``rag.svr.task_executor_refactor.chunk_post_processor``.
-        """
+        """瘦委托器。管道位于
+        ``rag.svr.task_executor_refactor.chunk_post_processor``。"""
         from rag.svr.task_executor_refactor.chunk_post_processor import (
             run_document_post_chunking_if_last,
         )
@@ -770,7 +760,7 @@ class TaskHandler:
     async def _get_storage_binary(cls, bucket: str, name: str) -> bytes:
         from common import settings
 
-        """Get binary from storage."""
+        """从存储中获取二进制文件。"""
         return await thread_pool_exec(settings.STORAGE_IMPL.get, bucket, name)
 
     @staticmethod
@@ -780,17 +770,16 @@ class TaskHandler:
         doc_id: str,
         batch_size: int = 500,
     ) -> AsyncIterator[List[Dict]]:
-        """Stream a document's chunks from the doc store one batch at a time.
+        """从文档存储中一次一批地流式传输文档的块。
 
-        Async generator that yields successive batches of up to ``batch_size``
+        异步生成器可连续生成多达``batch_size``
         chunks. Order is pushed to the doc store via
         ``OrderByExpr().asc("page_num_int").asc("top_int")`` so callers do
         not need to re-sort. Rows with a ``compile_kwd`` marker (artifact
         pages, structure entities, etc.) are filtered out defensively.
 
-        Memory is bounded by ``batch_size``: at most one page is materialised
-        at a time, so long documents do not balloon the worker's heap.
-        """
+        Memory is bounded by ``batch_size``：最多一个页面已具体化
+        一次，如此长的文档不会使工人的堆膨胀。"""
         from common.doc_store.doc_store_base import OrderByExpr
 
         index_nm = search.index_name(tenant_id)
@@ -820,10 +809,10 @@ class TaskHandler:
                     {
                         "doc_id": [doc_id],
                         "available_int": 1,
-                        # Compilation writes its output back to the same
-                        # document index. Exclude those rows in the query so
-                        # they cannot change offset pagination while this
-                        # task is still streaming source chunks.
+                        # 编译将其输出写回到相同的
+                        # 文档索引。排除查询中的这些行
+                        # 他们无法更改偏移分页，而这
+                        # 任务仍在流式传输源块。
                         "must_not": {"exists": "compile_kwd"},
                     },
                     [],
@@ -835,15 +824,15 @@ class TaskHandler:
                 )
                 field_map = settings.docStoreConn.get_fields(res, select_fields)
             except Exception:
-                logging.exception("load_chunks_for_doc: failed to load chunks for doc=%s", doc_id)
+                logging.exception("load_chunks_for_doc：无法加载 doc=%s 的块", doc_id)
                 return
             if not field_map:
-                # Recover rows damaged by the old doc-page-source upsert, which
-                # updated every row sharing ``doc_id`` and stamped source chunks
-                # with ``compile_kwd=wiki_doc_page_source``. Genuine tracking
-                # rows have no chunk body; MAP rows are unavailable. Source
-                # rows remain available and retain their content, so they can
-                # be identified without guessing from ids.
+                # 恢复由旧的 doc-page-source upsert 损坏的行，这
+                # 更新了共享“`doc_id`”的每一行并标记了源块
+                # 与“`compile_kwd=wiki_doc_page_source`”。正品追踪
+                # 行没有块体； MAP 行不可用。来源
+                # 行仍然可用并保留其内容，因此它们可以
+                # 无需根据 ids 进行猜测即可识别。
                 try:
                     recovery_fields = [*select_fields, "available_int"]
                     recovered_batch: List[Dict] = []
@@ -891,13 +880,13 @@ class TaskHandler:
                         recovery_offset += recovery_page_size
                     if recovered_batch:
                         logging.warning(
-                            "load_chunks_for_doc: recovered %d source chunk(s) mislabeled as wiki_doc_page_source doc=%s",
+                            "load_chunks_for_doc：恢复的 %d 源块被错误标记为 wiki_doc_page_source doc=%s",
                             len(recovered_batch),
                             doc_id,
                         )
                         yield recovered_batch
                 except Exception:
-                    logging.exception("load_chunks_for_doc: recovery query failed for doc=%s", doc_id)
+                    logging.exception("load_chunks_for_doc：doc = %s 的恢复查询失败", doc_id)
                 return
 
             batch: List[Dict] = []
@@ -921,7 +910,7 @@ class TaskHandler:
 
     @classmethod
     def _build_toc(cls, ctx: TaskContext, docs: List[Dict], progress_cb: Callable) -> Optional[Dict]:
-        """Build table of contents."""
+        """构建目录。"""
         progress_cb(msg="Start to generate table of content ...")
         chat_model_config = resolve_model_config(ctx.tenant_id, LLMType.CHAT, ctx.llm_id)
         with LLMBundle(ctx.tenant_id, chat_model_config, lang=ctx.language) as chat_mdl:
@@ -933,9 +922,9 @@ class TaskHandler:
                 ),
             )
 
-            # NOTE: asyncio.run() creates a new event loop in the worker thread
-            # (this method is called via asyncio.to_thread), which is the
-            # intended pattern for bridging sync -> async in a thread context.
+            # NOTE：asyncio.run() 在工作线程中创建一个新的事件循环
+            # （该方法通过asyncio.to_thread调用），这是
+            # 用于在线程上下文中桥接同步 -> 异步的模式。
             toc: list[dict] = asyncio.run(run_toc_from_text([d["content_with_weight"] for d in docs], chat_mdl, progress_cb))
             logging.info("------------ T O C -------------\n" + json.dumps(toc, ensure_ascii=False, indent="  "))
 
@@ -976,7 +965,7 @@ class TaskHandler:
             return None
 
     async def _delete_raptor_chunks(self, doc_id: str, tenant_id: str, kb_id: str, keep_method: Optional[str]) -> int:
-        """Delete RAPTOR chunks."""
+        """删除 RAPTOR 块。"""
         if self._task_context.write_interceptor:
             return self._task_context.write_interceptor.intercept("delete_raptor_chunks")
         else:

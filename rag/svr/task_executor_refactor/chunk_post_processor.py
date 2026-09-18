@@ -13,15 +13,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Chunk Post-Processor Module.
+"""Chunk 后处理器模块。
 
-Provides post-processing functions for chunks:
-- Keyword extraction
-- Question generation
-- Metadata generation
-- Content tagging
-"""
+提供块的后处理功能：
+- 关键词提取
+- 问题生成
+- 元数据生成
+- 内容标记"""
 
 import asyncio
 import json
@@ -43,20 +41,19 @@ from rag.prompts.generator import content_tagging, gen_metadata, keyword_extract
 from rag.svr.task_executor_refactor.task_context import TaskContext
 
 
-# Elasticsearch keyword fields reject terms whose UTF-8 encoding exceeds
-# 32766 bytes. Split oversized terms so ingestion never fails because a
-# malformed LLM response produced a single huge "keyword".
+# Elasticsearch 关键字字段拒绝 UTF-8 编码超过的术语
+# 32766 字节。分割超大术语，因此摄取永远不会失败，因为
+# 格式错误的 LLM 响应产生了一个巨大的“关键字”。
 _ES_KEYWORD_MAX_TERM_BYTES = 32766
 
 
 def _sanitize_keyword_term(term: str) -> list[str]:
-    """Return keyword pieces that fit into an Elasticsearch keyword field.
+    """返回适合 Elasticsearch 关键字字段的关键字片段。
 
-    If ``term`` is small enough it is returned as-is. Otherwise it is
-    truncated at a character boundary so the UTF-8 encoding never exceeds
-    the ES keyword limit. This avoids corrupting multi-byte characters by
-    slicing raw bytes.
-    """
+    如果“`term`”足够小，则按原样返回。否则就是
+    在字符边界处截断，因此 UTF-8 编码永远不会超过
+    ES 关键字限制。这可以避免损坏多字节字符
+    切片原始字节。"""
     term = term.strip()
     if not term:
         return []
@@ -65,7 +62,7 @@ def _sanitize_keyword_term(term: str) -> list[str]:
         return [term]
 
     logging.warning(
-        "Sanitizing oversized keyword term (%d bytes, limit %d)",
+        "清理超大关键字术语（%d 字节，限制 %d）",
         term_byte_length,
         _ES_KEYWORD_MAX_TERM_BYTES,
     )
@@ -86,12 +83,11 @@ def _sanitize_keyword_term(term: str) -> list[str]:
 
 
 async def extract_keywords(docs: list[dict], ctx: TaskContext) -> None:
-    """Extract keywords for chunks.
+    """提取块的关键字。
 
-    Args:
-        docs: List of chunk dictionaries to process.
-        ctx: TaskContext containing task configuration.
-    """
+    参数：
+        docs：要处理的块字典列表。
+        ctx: TaskContext 包含任务配置。"""
     chat_limiter = ctx.chat_limiter
 
     st = timer()
@@ -128,12 +124,11 @@ async def extract_keywords(docs: list[dict], ctx: TaskContext) -> None:
 
 
 async def generate_questions(docs: list[dict], ctx: TaskContext) -> None:
-    """Generate questions for chunks.
+    """生成块的问题。
 
-    Args:
-        docs: List of chunk dictionaries to process.
-        ctx: TaskContext containing task configuration.
-    """
+    参数：
+        docs：要处理的块字典列表。
+        ctx: TaskContext 包含任务配置。"""
     chat_limiter = ctx.chat_limiter
 
     st = timer()
@@ -160,7 +155,7 @@ async def generate_questions(docs: list[dict], ctx: TaskContext) -> None:
         try:
             await asyncio.gather(*tasks, return_exceptions=False)
         except Exception as e:
-            logging.error("Error in doc_question_proposal", exc_info=e)
+            logging.error("doc_question_proposal 中的错误", exc_info=e)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -169,24 +164,23 @@ async def generate_questions(docs: list[dict], ctx: TaskContext) -> None:
 
 
 def build_metadata_config(parser_config: dict) -> list:
-    """Build the metadata configuration from parser_config.
+    """从 parser_config 构建元数据配置。
 
-    Extracts and normalizes ``metadata`` and ``built_in_metadata`` from the
+    提取并标准化``metadata`` and ``built_in_metadata`` from the
     parser configuration into a single list or dict that is passed to the LLM
     cache and generation functions.
 
-    This should be called once per ``generate_metadata`` invocation — the result
+    This should be called once per `ZXQKEEP00 090005ZXQ` invocation — the result
     is identical for every chunk within the same document parse session so
     extracting it avoids rebuilding inside the per-chunk async task.
 
     Args:
         parser_config: Configuration dict from the parser, expected to contain
             ``metadata`` (dict or list) and optionally ``built_in_metadata``
-            (list of metadata item dicts).
+            （元数据项字典列表）。
 
-    Returns:
-        A list or dict representing the merged metadata configuration.
-    """
+    返回：
+        表示合并的元数据配置的列表或字典。"""
     metadata_conf = parser_config.get("metadata", [])
     built_in_metadata = list(parser_config.get("built_in_metadata") or [])
     if isinstance(metadata_conf, dict):
@@ -208,12 +202,11 @@ def build_metadata_config(parser_config: dict) -> list:
 
 
 async def generate_metadata(docs: list[dict], ctx: TaskContext) -> None:
-    """Generate metadata for chunks.
+    """生成块的元数据。
 
-    Args:
-        docs: List of chunk dictionaries to process.
-        ctx: TaskContext containing task configuration.
-    """
+    参数：
+        docs：要处理的块字典列表。
+        ctx: TaskContext 包含任务配置。"""
     chat_limiter = ctx.chat_limiter
 
     st = timer()
@@ -240,7 +233,7 @@ async def generate_metadata(docs: list[dict], ctx: TaskContext) -> None:
         try:
             await asyncio.gather(*tasks, return_exceptions=False)
         except Exception as e:
-            logging.error("Error in gen_metadata", exc_info=e)
+            logging.error("gen_metadata 中的错误", exc_info=e)
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -285,12 +278,11 @@ def apply_built_in_metadata(ctx: TaskContext) -> None:
 
 
 async def apply_tags(docs: list[dict], ctx: TaskContext) -> None:
-    """Apply tags to chunks.
+    """将标签应用于块。
 
-    Args:
-        docs: List of chunk dictionaries to process.
-        ctx: TaskContext containing task configuration.
-    """
+    参数：
+        docs：要处理的块字典列表。
+        ctx: TaskContext 包含任务配置。"""
     chat_limiter = ctx.chat_limiter
 
     ctx.progress_cb(msg="Start to tag for every chunk ...")
@@ -356,36 +348,35 @@ async def apply_tags(docs: list[dict], ctx: TaskContext) -> None:
 
 
 def count_with_key(docs: list[dict], key: str) -> int:
-    """Count docs that have a specific key.
+    """统计具有特定键的文档。
 
-    Args:
-        docs: List of chunk dictionaries.
-        key: The key to check for.
+    参数：
+        docs：块字典列表。
+        key：要检查的密钥。
 
-    Returns:
-        Count of docs that have the key.
-    """
+    返回：
+        具有密钥的文档计数。"""
     return sum(1 for d in docs if d.get(key))
 
 
 # =====================================================================
-# Document post-chunking pipeline
+# Document 分块后管道
 # ---------------------------------------------------------------------
-# Extracted from ``task_handler`` to keep the handler class small.
-# The public entry point is :func:`run_document_post_chunking_if_last`;
-# everything below is called (transitively) from there:
+# 从“`task_handler`”中提取，以保持处理程序类较小。
+# 公共入口点为:func:`run_document_post_chunking_if_last`；
+# 下面的所有内容都是从那里调用（传递）的：
 #   run_document_post_chunking_if_last
 #     ├─ run_document_structure_compile
 #     │    ├─ run_tree_templates
 #     │    │    ├─ load_chunks_with_vec
 #     │    │    ├─ rechunk_doc_by_tree
 #     │    │    └─ raptor_tree_to_graph
-#     │    └─ (streaming compile via chat models per template)
-#     └─ handler._run_raptor       ← stays on the handler
+# │ └─（通过每个模板的聊天模型进行流式编译）
+# └─ handler._run_raptor ← 留在处理程序上
 #
-# All entries take ``handler`` (``TaskHandler``) as their first arg so
-# they can reach the handler's ``_task_context``, ``_run_raptor``, and
-# ``_load_chunks_for_doc`` without a circular import.
+# 所有条目都将 ``handler`` (``TaskHandler``) 作为第一个参数，因此
+# 他们可以到达处理程序的``_task_context``, ``_run_raptor``，并且
+# ``_load_chunks_for_doc`` 没有循环导入。
 # =====================================================================
 
 from collections.abc import Callable
@@ -405,11 +396,11 @@ from api.db.services.task_service import (
 from common.misc_utils import thread_pool_exec
 from common.token_utils import num_tokens_from_string
 
-# ----- tunables ------------------------------------------------------
-# The structure-compile batching / merge-flush / chain-correction tunables
-# and the non-tree compilation core moved to
-# ``rag.advanced_rag.knowlege_compile.runner`` so the ``rag.flow`` Compiler
-# component can share them. Re-exported here for backwards compatibility.
+# ----- 可调参数 ------------------------------------------------------
+# 结构编译批处理/合并刷新/链校正可调参数
+# 和非树编译核心移至
+# ``rag.advanced_rag.knowlege_compile.runner`` so the ``rag.flow`` 编译器
+# 组件可以共享它们。此处重新导出以实现向后兼容性。
 from rag.advanced_rag.knowlege_compile.runner import (
     DOC_STRUCTURE_COMPILE_BATCH_CHUNKS,
     DOC_STRUCTURE_MERGE_MAX_DOCS,  # noqa: F401
@@ -419,7 +410,7 @@ from rag.advanced_rag.knowlege_compile.runner import (
 )
 from rag.nlp import search
 
-# ----- parser_config helpers -----------------------------------------
+# ----- parser_config 助手 -----------------------------------------
 
 
 def _parser_config_compilation_template_group_ids(parser_config) -> list[str]:
@@ -465,7 +456,7 @@ def _parser_config_compilation_template_ids(parser_config, tenant_id: str) -> li
 
 
 def _resolve_ingestion_chat_llm_id(ctx) -> str:
-    """Pick the ingestion model id for a knowledge-compilation template."""
+    """选择知识编译模板的摄取模型 ID。"""
     doc_cfg = getattr(ctx, "parser_config", None) or {}
     if isinstance(doc_cfg, dict):
         did = doc_cfg.get("llm_id")
@@ -474,13 +465,13 @@ def _resolve_ingestion_chat_llm_id(ctx) -> str:
     return ctx.llm_id
 
 
-# ----- progress helper -----------------------------------------------
+# ----- 进度助手------------------------------------------------------------
 
 
 def cap_done_progress(progress_cb: Callable) -> Callable:
-    """Wrap a progress callback so any ``prog >= 1`` gets clamped to
-    ``0.99`` — the final ``1.0`` is reserved for the caller who owns
-    the task's terminal state."""
+    """包装一个进度回调，以便任何“`prog >= 1`` gets clamped to
+    ``0.99`` — the final ``1.0`”保留给拥有的调用者
+    任务的终止状态。"""
 
     def capped_progress(*args, **kwargs):
         args = list(args)
@@ -497,18 +488,18 @@ def cap_done_progress(progress_cb: Callable) -> Callable:
     return capped_progress
 
 
-# ----- tree helpers --------------------------------------------------
+# -----树助手------------------------------------------------
 
 
 def raptor_tree_to_graph(tree: dict) -> dict:
-    """Project a RAPTOR tree dict (from ``Raptor(is_tree=True)``) onto
+    """项目 RAPTOR 树字典（来自``Raptor(is_tree=True)``) onto
     the ``{entities, relations}`` shape the document-structure graph
-    endpoint already serves for ``page_index``-kind rows."""
+    endpoint already serves for ``page_index``类行。"""
     entities: list[dict] = []
     relations: list[dict] = []
 
     def _collapse_unary(node: dict) -> dict:
-        """Collapse tree nodes that only wrap one child."""
+        """折叠仅包裹一个子节点的树节点。"""
         collapsed = dict(node)
         collapsed["children"] = [_collapse_unary(child) for child in node.get("children") or [] if isinstance(child, dict)]
 
@@ -555,9 +546,9 @@ def raptor_tree_to_graph(tree: dict) -> dict:
         if isinstance(src_ids, list) and src_ids:
             ent["source_chunk_ids"] = [s for s in src_ids if isinstance(s, str) and s]
         entities.append(ent)
-        # A summary and its child can occasionally receive the same LLM-generated
-        # title. They are still valid tree nodes, but must not become a self-loop
-        # when the tree is projected to graph relations.
+        # 摘要及其子级偶尔会收到相同的 LLM 生成的内容
+        # 标题。它们仍然是有效的树节点，但一定不能成为自循环
+        # 当树投影到图关系时。
         if parent_id is not None and parent_id != node_id:
             relations.append({"from": parent_id, "to": node_id, "type": "child"})
         for child in node.get("children") or []:
@@ -568,7 +559,7 @@ def raptor_tree_to_graph(tree: dict) -> dict:
 
 
 async def rewrite_duplicate_tree_names(tree: dict, chat_mdl) -> None:
-    """Rewrite only duplicate tree titles whose descriptions differ."""
+    """仅重写描述不同的重复树标题。"""
     from rag.advanced_rag.knowlege_compile._common import knowledge_compile_gen_conf
     from rag.prompts.generator import gen_json
 
@@ -608,7 +599,7 @@ async def rewrite_duplicate_tree_names(tree: dict, chat_mdl) -> None:
                 gen_conf=knowledge_compile_gen_conf(chat_mdl, {"temperature": 0.0}),
             )
         except Exception:
-            logging.exception("tree-template: duplicate title rewrite failed for title=%s", title)
+            logging.exception("树模板：标题 = %s 的重复标题重写失败", title)
             continue
 
         rewrites = {}
@@ -619,8 +610,8 @@ async def rewrite_duplicate_tree_names(tree: dict, chat_mdl) -> None:
             if new_title:
                 node["title"] = new_title
 
-    # The LLM is asked to produce distinct names, but enforce that contract
-    # deterministically before the graph uses titles as relation endpoints.
+    # LLM 被要求提供不同的名称，但强制执行该合同
+    # 在图形使用标题作为关系端点之前确定。
     used_names: dict[str, int] = {}
 
     def _ensure_unique(node: dict) -> None:
@@ -644,10 +635,10 @@ async def load_chunks_with_vec(
     doc_id: str,
     vctr_nm: str,
 ) -> list[tuple[str, "np.ndarray", str]]:
-    """Page through this doc's chunks pulling content + vector +
-    chunk_id, in the shape ``RaptorService.build_doc_tree`` expects.
-    Mirrors the streaming ``_load_chunks_for_doc`` loader but with the
-    vector field pre-selected."""
+    """翻阅此文档的块，提取内容 + 矢量 +
+    chunk_id，形状为“`RaptorService.build_doc_tree`` expects.
+    Mirrors the streaming ``_load_chunks_for_doc`”装载机，但带有
+    预先选择的向量场。"""
     from common.doc_store.doc_store_base import OrderByExpr
 
     index_nm = search.index_name(tenant_id)
@@ -682,7 +673,7 @@ async def load_chunks_with_vec(
             field_map = settings.docStoreConn.get_fields(res, select_fields)
         except Exception:
             logging.exception(
-                "tree-template: failed to load chunks for doc=%s",
+                "树模板：无法加载 doc=%s 的块",
                 doc_id,
             )
             break
@@ -714,11 +705,10 @@ async def rechunk_doc_by_tree(
     template_id: str,
     embedding_model,
 ) -> None:
-    """Merge each leaf cluster's source chunks into a single
-    replacement chunk and rewrite the tree's leaf-cluster
+    """将每个叶簇的源块合并为一个
+    替换块并重写树的叶簇
     ``source_chunk_ids`` in-place. Original chunks are soft-deleted
-    via ``available_int=0`` and stamped with ``superseded_by_chunk_id``.
-    """
+    via ``available_int=0`` and stamped with ``superseded_by_chunk_id``。"""
     from datetime import datetime
 
     from common.misc_utils import get_uuid
@@ -794,7 +784,7 @@ async def rechunk_doc_by_tree(
         field_map = settings.docStoreConn.get_fields(res, select_fields)
     except Exception:
         logging.exception(
-            "rechunk: failed to load source chunks for doc=%s template=%s",
+            "重新分块：无法加载 doc=%s 模板=%s 的源块",
             ctx.doc_id,
             template_id,
         )
@@ -860,7 +850,7 @@ async def rechunk_doc_by_tree(
         vectors, _ = embedding_model.encode(contents)
     except Exception:
         logging.exception(
-            "rechunk: embedding failed for doc=%s template=%s",
+            "重新分块：doc=%s 模板=%s 嵌入失败",
             ctx.doc_id,
             template_id,
         )
@@ -870,7 +860,7 @@ async def rechunk_doc_by_tree(
             row[vctr_nm] = np.asarray(vec, dtype=np.float32).tolist()
         except Exception:
             logging.exception(
-                "rechunk: vector cast failed; skipping row %s",
+                "重新分块：矢量转换失败；跳行 %s",
                 row.get("id"),
             )
             row[vctr_nm] = None
@@ -887,7 +877,7 @@ async def rechunk_doc_by_tree(
         )
     except Exception:
         logging.exception(
-            "rechunk: insert failed for doc=%s template=%s",
+            "重新分块： doc=%s 模板=%s 插入失败",
             ctx.doc_id,
             template_id,
         )
@@ -916,7 +906,7 @@ async def rechunk_doc_by_tree(
                 )
             except Exception:
                 logging.exception(
-                    "rechunk: soft-delete failed for chunk=%s (merged=%s)",
+                    "重新分块：块 = %s 的软删除失败（合并 = %s）",
                     cid,
                     new_chunk_id,
                 )
@@ -929,10 +919,10 @@ async def run_tree_templates(
     embedding_model,
     doc_name: str,
 ) -> None:
-    """Run the ``tree``-kind compilation templates for the current
+    """运行``tree``-kind compilation templates for the current
     doc. Each pair runs RAPTOR with ``is_tree=True`` via
     ``RaptorService.build_doc_tree`` and persists a single graph row
-    via ``_struct_upsert_graph_json``."""
+    via ``_struct_upsert_graph_json``。"""
     from rag.advanced_rag.knowlege_compile.structure import _struct_upsert_graph_json
     from rag.svr.task_executor_refactor.raptor_service import RaptorService
 
@@ -944,7 +934,7 @@ async def run_tree_templates(
     except Exception:
         doc_id = getattr(ctx, "_task", {}).get("doc_id") if hasattr(ctx, "_task") else None
     if not doc_id:
-        logging.warning("tree-template: no doc_id on task context; skipping")
+        logging.warning("树模板：任务上下文中没有 doc_id；跳绳")
         return
 
     vctr_nm = "q_%d_vec" % len(embedding_model.encode(["x"])[0][0])
@@ -983,14 +973,14 @@ async def run_tree_templates(
             )
         except Exception:
             logging.exception(
-                "tree-template %s: RAPTOR build failed for doc %s",
+                "树模板 %s：文档 %s 的 RAPTOR 构建失败",
                 template_id,
                 doc_id,
             )
             continue
         if tree is None:
             logging.info(
-                "tree-template %s: no tree produced for doc %s",
+                "树模板 %s：没有为文档 %s 生成树",
                 template_id,
                 doc_id,
             )
@@ -1006,7 +996,7 @@ async def run_tree_templates(
                 )
             except Exception:
                 logging.exception(
-                    "tree-template %s: re-chunking failed for doc %s; persisting tree with original chunk ids",
+                    "树模板 %s：文档 %s 的重新分块失败；具有原始块 ID 的持久树",
                     template_id,
                     doc_id,
                 )
@@ -1025,20 +1015,21 @@ async def run_tree_templates(
             )
         except Exception:
             logging.exception(
-                "tree-template %s: graph upsert failed for doc %s",
+                "树模板 %s：文档 %s 的图形更新插入失败",
                 template_id,
                 doc_id,
             )
             continue
 
-        # Persist the per-doc nav_doc right after the graph node, so parsing a
-        # file yields a nav_doc with the FULL entity descriptions as
-        # graph_content -- without needing to run GENERATE NAVIGATION separately
-        # and without changing the nav clustering input. The `title` keeps using
-        # tree["title"] (what upsert_dataset_nav_doc used to derive from `tree`
-        # before this change), so the parse cluster-title logic is unchanged.
-        # Only do this when the graph actually contains entities, otherwise skip
-        # (avoid empty graph_content when RAPTOR produced nothing).
+        # 在图形节点之后保留每个文档 nav_doc，因此解析
+        # 文件生成 nav_doc，其中 FULL 实体描述为
+        # graph_content -- 无需单独运行 GENERATE NAVIGATION
+        # 并且无需更改导航聚类输入。 `title`继续使用
+        # 树[“标题”]（upsert_dataset_nav_doc用于从`tree`派生
+        # 此更改之前为
+        # ），因此解析簇标题逻辑未更改。
+        # 仅当图形实际包含实体时才执行此操作，否则跳过
+        # （当RAPTOR什么也没产生时，避免空graph_content）。
         try:
             if graph.get("entities"):
                 from rag.advanced_rag.knowlege_compile.dataset_nav import (
@@ -1057,7 +1048,7 @@ async def run_tree_templates(
                 )
         except Exception:
             logging.exception(
-                "tree-template %s: dataset_nav upsert failed for doc %s",
+                "树模板 %s：文档 %s 的 dataset_nav 更新插入失败",
                 template_id,
                 doc_id,
             )
@@ -1068,17 +1059,14 @@ async def run_tree_templates(
 
 
 async def run_document_structure_compile(handler, embedding_model: LLMBundle) -> None:
-    """Run document-scoped knowledge compilation for non-artifact
-    templates. Streams the doc's chunks (via
+    """对非工件运行文档范围的知识编译
+    模板。流式传输文档的块（通过
     ``handler._load_chunks_for_doc``) and fans each batch out to every
     configured non-artifact template, flushing accumulators through
-    ``merge_compiled_structures`` at :data:`DOC_STRUCTURE_MERGE_MAX_DOCS`.
-
-    After extract+merge, if any template has ``synthesis.enabled``,
-    runs ``wiki_plan_from_reduction`` + ``wiki_refine_from_plan`` to
-    generate synthesis output (wiki pages, essence paragraphs, etc.).
-    Compile_kwd and REFINE prompt are read from the template config.
-    """
+    ``merge_compiled_structures`` at :data:`DOC_STRUCTURE_MERGE_MAX_DOCSZXQKEEP00 650005ZXQ`synthesis.enabled``,
+    runs ``wiki_plan_from_reduction`` + ``wiki_refine_from_plan``到
+    生成综合输出（wiki 页面、精华段落等）。
+    Compile_kwd 和 REFINE 提示符是从模板配置中读取的。"""
     from api.apps.restful_apis.chunk_api import _compilation_template_kind
 
     ctx = handler._task_context
@@ -1097,7 +1085,7 @@ async def run_document_structure_compile(handler, embedding_model: LLMBundle) ->
         cfg = resolve_model_config(ctx.tenant_id, LLMType.CHAT, chat_llm_id)
         chat_mdl = LLMBundle(ctx.tenant_id, cfg, lang=ctx.language)
     except Exception:
-        logging.exception("document_structure_compile: cannot resolve ingestion chat model %s", chat_llm_id)
+        logging.exception("document_structure_compile：无法解析摄取聊天模型 %s", chat_llm_id)
         return
     chat_mdl_by_tid = {template_id: chat_mdl for template_id, _ in active_templates}
 
@@ -1154,14 +1142,13 @@ async def run_document_post_chunking_if_last(
     chunks_len: int,
     token_count: int,
 ) -> bool:
-    """Gate: only the last chunking task for a doc runs post-processing.
-    Returns ``True`` if the caller may proceed to its own terminal
+    """Gate：仅文档的最后一个分块任务运行后处理。
+    返回“`True`` if the caller may proceed to its own terminal
     progress update, ``False`` if the task was cancelled.
 
     The pass runs :func:`run_document_structure_compile` and
-    ``handler._run_raptor`` concurrently — they read the same chunks
-    but write disjoint ES rows.
-    """
+    ``handler._run_raptor`”同时——他们读取相同的块
+    但写入不相交的 ES 行。"""
     ctx = handler._task_context
     task_id = ctx.id
     task_doc_id = ctx.doc_id
@@ -1179,19 +1166,19 @@ async def run_document_post_chunking_if_last(
     if remaining_chunking_tasks != 0:
         if chunking_aborted:
             logging.info(
-                "Chunking for doc %s was aborted before task %s reached post-processing; skip document finalizers.",
+                "在任务 %s 到达后处理之前，文档 %s 的分块已中止；跳过文档终结器。",
                 task_doc_id,
                 task_id,
             )
         elif remaining_chunking_tasks is not None and remaining_chunking_tasks < 0:
             logging.warning(
-                "Chunking counter for doc %s is missing or expired after task %s; skip post-processing to avoid duplicate finalizers.",
+                "任务 %s 后，文档 %s 的分块计数器丢失或过期；跳过后处理以避免重复的终结器。",
                 task_doc_id,
                 task_id,
             )
         else:
             logging.info(
-                "Chunk doc(%s), page(%s-%s), chunks(%s), token(%s), elapsed:%.2f; waiting for %s chunking task(s) before post-processing",
+                "Chunk 文档（%s），页面（%s-%s），块（%s），代币(%s)，已过去：%.2f;在后处理之前等待 %s 分块任务",
                 ctx.name,
                 ctx.from_page,
                 ctx.to_page,
@@ -1213,12 +1200,12 @@ async def run_document_post_chunking_if_last(
                 await handler._run_raptor(embedding_model, vector_size, mark_done=False)
             else:
                 logging.warning(
-                    "raptor: cannot resolve doc %s to queue per-doc task",
+                    "raptor：无法解析文档 %s 来对每个文档任务进行排队",
                     task_doc_id,
                 )
         except Exception:
             logging.exception(
-                "raptor: failed to queue per-doc task for doc %s",
+                "raptor：无法对文档 %s 的每个文档任务进行排队",
                 task_doc_id,
             )
 

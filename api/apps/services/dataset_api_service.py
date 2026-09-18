@@ -34,18 +34,19 @@ from common.constants import PAGERANK_FLD, FileSource, LLMType, RetCode, StatusE
 from common.misc_utils import thread_pool_exec, thread_pool_exec_long_time
 from rag.advanced_rag.knowlege_compile.wiki import WIKI_PAGE_COMPILE_KWD
 
-# KB-wide structure-graph merge index types. Each (re)builds the ``dataset_graph``
-# rows for one structure kind via ``rebuild_dataset_structure_graph_json``; the
-# task_type equals the index_type and the KB task-id column is ``<type>_task_id``.
-# The value is the friendly kind resolvable through ``_resolve_dataset_structure_kind``
-# (defined below), except ``structure`` which is the merge-all variant.
+# KB 范围的结构图合并索引类型。每个（重新）构建“`dataset_graph`”
+# 通过 ``rebuild_dataset_structure_graph_json`` 获取一种结构类型的
+# 行；的
+# task_type 等于 index_type，KB 任务 ID 列为“`<type>_task_id`”。
+# 该值为可通过``_resolve_dataset_structure_kind``解析的友好类型
+# （定义如下），“`structure`”除外，它是全部合并变体。
 _STRUCTURE_INDEX_TYPE_TO_KIND = {
     "structure_graph": "graph",
     "structure_mindmap": "mindmap",
     "timeline": "timeline",
     "session_graph": "session_graph",
     "session_essence": "session_essence",
-    "structure": None,  # merge-all: rebuild every dataset-merge kind
+    "structure": None,  # merge-all：重建每个数据集合并类型
 }
 _STRUCTURE_INDEX_TYPES = frozenset(_STRUCTURE_INDEX_TYPE_TO_KIND)
 
@@ -57,8 +58,8 @@ _INDEX_TYPE_TO_TASK_TYPE = {
     "mindmap": "structure_mindmap",
     "wiki": "wiki",
     "skill": "skill",
-    # Structure merge types carry their own task_type (== index_type) so the
-    # executor can resolve which kind to merge from the task body.
+    # 结构合并类型携带自己的 task_type (== index_type)，因此
+    # 执行器可以从任务体中解析出要合并哪种类型。
     **{t: t for t in _STRUCTURE_INDEX_TYPES},
 }
 
@@ -87,17 +88,17 @@ _INDEX_TYPE_TO_DISPLAY_NAME = {
 
 
 async def create_dataset(tenant_id: str, req: dict):
-    """
-    Create a new dataset.
+    """创建一个新数据集。
 
-    :param tenant_id: tenant ID
-    :param req: dataset creation request
-    :return: (success, result) or (success, error_message)
-    """
-    # Extract ext field for additional parameters
+    ：参数 tenant_id：租户 ID
+    :param req: 数据集创建请求
+    :return: (成功,结果)或(成功,error_message)"""
+    # Knowledgebase 只保存知识库级配置。创建时没有 Document、Task 或检索索引；
+    # 索引会在第一批文档解析时由任务执行器按需创建。
+    # 提取附加参数的 ext 字段
     ext_fields = req.pop("ext", {})
 
-    # Map auto_metadata_config (if provided) into parser_config structure
+    # 将 auto_metadata_config（如果提供）映射到 parser_config 结构
     auto_meta = req.pop("auto_metadata_config", {})
     if auto_meta:
         parser_cfg = req.get("parser_config") or {}
@@ -122,7 +123,7 @@ async def create_dataset(tenant_id: str, req: dict):
     if not e:
         return False, create_dict
 
-    # Insert embedding model(embd id)
+    # 插入嵌入模型(embd id)
     ok, t = TenantService.get_by_id(tenant_id)
     if not ok:
         return False, "Tenant not found"
@@ -139,24 +140,32 @@ async def create_dataset(tenant_id: str, req: dict):
     if not ok:
         return False, "Dataset created failed"
     response_data = remap_dictionary_keys(k.to_dict())
+    logging.info(
+        "知识库已创建 租户ID=%s 知识库ID=%s 解析器ID=%s 向量模型ID=%s 权限=%s",
+        tenant_id,
+        create_dict["id"],
+        create_dict.get("parser_id"),
+        create_dict.get("embd_id"),
+        create_dict.get("permission"),
+    )
     return True, response_data
 
 
 def _delete_datasets_sync(tenant_id: str, ids: list = None, delete_all: bool = False):
-    """
-    Delete datasets.
+    """删除数据集。
 
-    :param tenant_id: tenant ID
-    :param ids: list of dataset IDs
-    :param delete_all: whether to delete all datasets of the tenant (if ids is not provided)
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数 tenant_id：租户 ID
+    :param ids: 数据集列表 IDs
+    :param delete_all: 是否删除租户的所有数据集（如果没有提供ids）
+    :return: (成功,结果)或(成功,error_message)"""
     kb_id_instance_pairs = []
     if not ids:
         if not delete_all:
             return True, {"success_count": 0}
         else:
             ids = [kb.id for kb in KnowledgebaseService.query(tenant_id=tenant_id)]
+
+    logging.info("知识库删除已开始 租户ID=%s 知识库ID列表=%s 是否全部删除=%s", tenant_id, ids, delete_all)
 
     error_kb_ids = []
     for kb_id in ids:
@@ -171,10 +180,12 @@ def _delete_datasets_sync(tenant_id: str, ids: list = None, delete_all: bool = F
     errors = []
     success_count = 0
     for kb_id, kb in kb_id_instance_pairs:
-        # Cancel this dataset's queued syncs before touching its documents.
-        # Tasks are only picked up while they are SCHEDULE, so cancelling stops
-        # every run that has not started yet; a sync already in flight is not
-        # interruptible, which is what the stranded-row sweep below covers.
+        # 删除知识库是跨存储清理：先处理 Document/对象关系，再删除 Doc Store 索引，
+        # 最后删除 Knowledgebase、连接器和同步日志。中途失败会进入 errors 返回给调用方。
+        # 在接触其文档之前取消此数据集的排队同步。
+        # 任务仅在 SCHEDULE 时才被拾取，因此取消停止
+        # 每一次尚未开始的运行；已在运行的同步不是
+        # 可中断，这就是下面的搁浅行扫描所涵盖的内容。
         SyncLogsService.filter_update(
             [SyncLogs.kb_id == kb_id, SyncLogs.status.in_([TaskStatus.SCHEDULE, TaskStatus.RUNNING])],
             {"status": TaskStatus.CANCEL},
@@ -193,18 +204,18 @@ def _delete_datasets_sync(tenant_id: str, ids: list = None, delete_all: bool = F
                     ]
                 )
             else:
-                # Normal uploads create a File2Document row via FileService.add_file_from_kb.
-                # A missing row usually means stale/partial data (e.g. link removed earlier,
-                # failed post-insert file linkage, or legacy rows). Deletion still proceeds.
+                # 正常上传通过 FileService.add_file_from_kb 创建 File2Document 行。
+                # 缺失行通常意味着 stale/partial 数据（e.g. 链接已删除，
+                # 插入后文件链接或旧行失败）。删除仍在继续。
                 logging.warning(
-                    "delete_datasets: document %s in dataset %s has no File2Document row; skipping linked file delete",
+                    "delete_datasets：数据集%s中的文档%s没有File2Document行；跳过链接文件删除",
                     doc.id,
                     kb_id,
                 )
             File2DocumentService.delete_by_document_id(doc.id)
         FileService.filter_delete([File.source_type == FileSource.KNOWLEDGEBASE, File.type == "folder", File.name == kb.name])
 
-        # Drop index for this dataset
+        # 该数据集的删除索引
         try:
             from rag.nlp import search
 
@@ -217,30 +228,34 @@ def _delete_datasets_sync(tenant_id: str, ids: list = None, delete_all: bool = F
             errors.append(f"Delete dataset error for {kb_id}")
             continue
 
-        # Unwire the data sources only once the dataset is really gone, so a
-        # failed deletion above leaves a dataset that is still linked and still
-        # syncable. Left behind, these rows keep the connector scheduler queueing
-        # syncs against a kb_id that no longer resolves, and any document such a
-        # run writes outlives its dataset -- an invisible row that later reports
-        # a cross-KB id collision against whatever dataset is linked next.
+        # 仅在数据集真正消失后才取消数据源连接，因此
+        # 上面删除失败，留下的数据集仍然链接并且仍然
+        # 可同步。这些行留在后面，使连接器调度程序保持排队
+        # 与不再解析的 kb_id 同步，以及任何文档，例如
+        # 运行写入的数据比其数据集的寿命更长 - 稍后报告的不可见行
+        # 针对接下来链接的任何数据集的跨 KB id 冲突。
         Connector2KbService.filter_delete([Connector2Kb.kb_id == kb_id])
         SyncLogsService.filter_delete([SyncLogs.kb_id == kb_id])
 
-        # Sweep anything the per-document loop could not see, including rows
-        # written by a sync that was already in flight when deletion started.
+        # 扫描每个文档循环看不到的任何内容，包括行
+        # 由删除开始时已在运行的同步写入。
         stranded = DocumentService.filter_delete([Document.kb_id == kb_id])
         if stranded:
-            logging.warning("delete_datasets: removed %s stranded document rows for dataset %s", stranded, kb_id)
+            logging.warning("delete_datasets：删除了数据集 %s 的 %s 搁浅文档行", stranded, kb_id)
 
         success_count += 1
+        logging.info("单个知识库删除完成 租户ID=%s 知识库ID=%s", tenant_id, kb_id)
 
     if not errors:
+        logging.info("知识库删除完成 租户ID=%s 成功数=%d 失败数=0", tenant_id, success_count)
         return True, {"success_count": success_count}
 
     error_message = f"Successfully deleted {success_count} datasets, {len(errors)} failed. Details: {'; '.join(errors)[:128]}..."
     if success_count == 0:
+        logging.warning("知识库删除完成 租户ID=%s 成功数=0 失败数=%d", tenant_id, len(errors))
         return False, error_message
 
+    logging.warning("知识库删除完成 租户ID=%s 成功数=%d 失败数=%d", tenant_id, success_count, len(errors))
     return True, {"success_count": success_count, "errors": errors[:5]}
 
 
@@ -249,13 +264,11 @@ async def delete_datasets(tenant_id: str, ids: list = None, delete_all: bool = F
 
 
 def get_dataset(dataset_id: str, tenant_id: str):
-    """
-    Get a single dataset.
+    """获取单个数据集。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -273,13 +286,11 @@ def get_dataset(dataset_id: str, tenant_id: str):
 
 
 def get_ingestion_summary(dataset_id: str, tenant_id: str):
-    """
-    Get ingestion summary for a dataset.
+    """获取数据集的摄取摘要。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -300,14 +311,12 @@ def get_ingestion_summary(dataset_id: str, tenant_id: str):
 
 
 async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
-    """
-    Update a dataset.
+    """更新数据集。
 
-    :param tenant_id: tenant ID
-    :param dataset_id: dataset ID
-    :param req: dataset update request
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数 tenant_id：租户 ID
+    ：参数dataset_id：数据集ID
+    :param req: 数据集更新请求
+    :return: (成功,结果)或(成功,error_message)"""
     if not req:
         return False, "no properties were modified"
 
@@ -319,10 +328,10 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if kb is None:
         return False, "Invalid Dataset ID"
 
-    # Extract ext field for additional parameters
+    # 提取附加参数的 ext 字段
     ext_fields = req.pop("ext", {})
 
-    # Map auto_metadata_config into parser_config if present
+    # 将 auto_metadata_config 映射到 parser_config（如果存在）
     auto_meta = req.pop("auto_metadata_config", {})
     if auto_meta:
         parser_cfg = req.get("parser_config") or {}
@@ -341,17 +350,17 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
         parser_cfg["enable_metadata"] = auto_meta.get("enabled", True)
         req["parser_config"] = parser_cfg
 
-    # Merge ext fields with req
+    # 将 ext 字段与 req 合并
     req.update(ext_fields)
 
-    # Extract connectors from request
+    # 从请求中提取连接器
     connectors = []
     if "connectors" in req:
         connectors = req["connectors"]
         del req["connectors"]
 
     if req.get("parser_config"):
-        # Flatten parent_child config into children_delimiter for the execution layer
+        # 将 parent_child 配置压平为 children_delimiter 用于执行层
         pc = req["parser_config"].get("parent_child", {})
         if pc.get("use_parent_child"):
             req["parser_config"]["children_delimiter"] = pc.get("children_delimiter", "\n")
@@ -373,7 +382,7 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
         del req["parser_config"]
 
     if kb.pipeline_id and req.get("parser_id") and not req.get("pipeline_id"):
-        # shift to use parser_id, delete old pipeline_id
+        # 转用 parser_id，删除旧的 pipeline_id
         req["pipeline_id"] = ""
 
     if "name" in req and req["name"].lower() != kb.name.lower():
@@ -402,7 +411,7 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
 
             settings.docStoreConn.update({"kb_id": kb.id}, {PAGERANK_FLD: req["pagerank"]}, search.index_name(kb.tenant_id), kb.id)
         else:
-            # Elasticsearch requires PAGERANK_FLD be non-zero!
+            # Elasticsearch 要求 PAGERANK_FLD 为非零！
             from rag.nlp import search
 
             settings.docStoreConn.update({"exists": PAGERANK_FLD}, {"remove": PAGERANK_FLD}, search.index_name(kb.tenant_id), kb.id)
@@ -411,14 +420,25 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
     if not KnowledgebaseService.update_by_id(kb.id, req):
         return False, "Update dataset error.(Database error)"
 
+    # 修改 parser/embedding 配置只影响后续解析。已存在的 Chunk 不会在这里自动重建；
+    # 若要应用新配置，需要由文档 ingest/rerun 链路显式重解析。
+    logging.info(
+        "知识库配置已更新 租户ID=%s 知识库ID=%s 变更字段=%s 解析配置是否变化=%s 向量模型是否变化=%s",
+        tenant_id,
+        dataset_id,
+        sorted(req.keys()),
+        "parser_id" in req or "parser_config" in req or "pipeline_id" in req,
+        "embd_id" in req or "tenant_embd_id" in req,
+    )
+
     ok, k = KnowledgebaseService.get_by_id(kb.id)
     if not ok:
         return False, "Dataset updated failed"
 
-    # Link connectors to the dataset
+    # 将连接器链接到数据集
     errors = Connector2KbService.link_connectors(kb.id, [conn for conn in connectors], tenant_id)
     if errors:
-        logging.error("Link KB errors: %s", errors)
+        logging.error("链接 KB 错误：%s", errors)
 
     response_data = remap_dictionary_keys(k.to_dict())
     response_data["connectors"] = connectors
@@ -426,13 +446,11 @@ async def update_dataset(tenant_id: str, dataset_id: str, req: dict):
 
 
 def list_datasets(tenant_id: str, args: dict):
-    """
-    List datasets.
+    """列出数据集。
 
-    :param tenant_id: tenant ID
-    :param args: query arguments
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数 tenant_id：租户 ID
+    :param args: 查询参数
+    :return: (成功,结果)或(成功,error_message)"""
     kb_id = args.get("id")
     kb_ids = args.get("ids")
     name = args.get("name")
@@ -448,7 +466,7 @@ def list_datasets(tenant_id: str, args: dict):
     elif isinstance(desc_arg, bool):
         desc = desc_arg
     else:
-        # unknown type, default to True
+        # 未知类型，默认为 True
         desc = True
 
     if kb_id and kb_ids:
@@ -477,7 +495,7 @@ def list_datasets(tenant_id: str, args: dict):
         accessible_ids = KnowledgebaseService.get_accessible_ids([m["tenant_id"] for m in tenants], tenant_id, kb_ids)
         denied_ids = [kb_id for kb_id in kb_ids if kb_id not in accessible_ids]
         if denied_ids:
-            logging.warning("User '%s' lacks permission for datasets: '%s'", tenant_id, ", ".join(denied_ids))
+            logging.warning("用户 '%s' 缺乏数据集的权限：'%s'", tenant_id, ", ".join(denied_ids))
         kb_ids = [kb_id for kb_id in kb_ids if kb_id in accessible_ids]
         if not kb_ids:
             return True, {"data": [], "total": 0}
@@ -519,13 +537,11 @@ def list_dataset_filters(tenant_id: str):
 
 
 async def get_knowledge_graph(dataset_id: str, tenant_id: str):
-    """
-    Get knowledge graph for a dataset.
+    """获取数据集的知识图。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -560,13 +576,11 @@ async def get_knowledge_graph(dataset_id: str, tenant_id: str):
 
 
 def delete_knowledge_graph(dataset_id: str, tenant_id: str):
-    """
-    Delete knowledge graph for a dataset.
+    """删除数据集的知识图。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -574,8 +588,8 @@ def delete_knowledge_graph(dataset_id: str, tenant_id: str):
     from rag.nlp import search
 
     settings.docStoreConn.delete({"knowledge_graph_kwd": ["graph", "subgraph", "entity", "relation", "community_report"]}, search.index_name(kb.tenant_id), dataset_id)
-    # Wiping the graph invalidates any phase-completion markers used to
-    # short-circuit resolution / community detection on resume.
+    # 擦除图形会使用于的任何阶段完成标记无效
+    # 短路解决/恢复时的社区检测。
     clear_phase_markers(dataset_id)
     KnowledgebaseService.update_by_id(
         kb.id,
@@ -586,14 +600,12 @@ def delete_knowledge_graph(dataset_id: str, tenant_id: str):
 
 
 def run_index(dataset_id: str, tenant_id: str, index_type: str):
-    """
-    Run an indexing task (graph/raptor/mindmap) for a dataset.
+    """为数据集运行索引任务 (graph/raptor/mindmap)。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param index_type: one of "graph", "raptor", "mindmap"
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    ：参数 index_type："graph"、"raptor"、"mindmap" 之一
+    :return: (成功,结果)或(成功,error_message)"""
     if index_type not in _VALID_INDEX_TYPES:
         return False, f"Invalid index type '{index_type}'. Must be one of {sorted(_VALID_INDEX_TYPES)}"
 
@@ -630,9 +642,9 @@ def run_index(dataset_id: str, tenant_id: str, index_type: str):
         types=[],
         suffix=[],
     )
-    # Disabled documents must not participate in a dataset-level structure
-    # rebuild. Keep them out of the fan-out task itself; the merger also
-    # applies a database-backed filter as a defense in depth.
+    # 禁用文档不得参与数据集级结构
+    # 重建。让它们远离扇出任务本身；此次合并还
+    # 应用数据库支持的过滤器作为深度防御。
     documents = [document for document in documents if str(document.get("status", "1")) != "0"]
     if not documents:
         return False, f"No documents in Dataset {dataset_id}"
@@ -649,14 +661,12 @@ def run_index(dataset_id: str, tenant_id: str, index_type: str):
 
 
 def trace_index(dataset_id: str, tenant_id: str, index_type: str):
-    """
-    Trace an indexing task (graph/raptor/mindmap) for a dataset.
+    """跟踪数据集的索引任务 (graph/raptor/mindmap)。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param index_type: one of "graph", "raptor", "mindmap"
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    ：参数 index_type："graph"、"raptor"、"mindmap" 之一
+    :return: (成功,结果)或(成功,error_message)"""
     if index_type not in _VALID_INDEX_TYPES:
         return False, f"Invalid index type '{index_type}'. Must be one of {sorted(_VALID_INDEX_TYPES)}"
 
@@ -683,13 +693,11 @@ def trace_index(dataset_id: str, tenant_id: str, index_type: str):
 
 
 def list_tags(dataset_id: str, tenant_id: str):
-    """
-    List tags for a dataset.
+    """列出数据集的标签。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数 dataset_id：数据集 ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -704,13 +712,11 @@ def list_tags(dataset_id: str, tenant_id: str):
 
 
 def aggregate_tags(dataset_ids: list[str], tenant_id: str):
-    """
-    Aggregate tags across multiple datasets.
+    """跨多个数据集聚合标签。
 
-    :param dataset_ids: list of dataset IDs
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    :param dataset_ids: 数据集列表 IDs
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_ids:
         return False, 'Lack of "dataset_ids"'
 
@@ -734,13 +740,11 @@ def aggregate_tags(dataset_ids: list[str], tenant_id: str):
 
 
 def get_flattened_metadata(dataset_ids: list[str], tenant_id: str):
-    """
-    Get flattened metadata for datasets.
+    """获取数据集的扁平化元数据。
 
-    :param dataset_ids: list of dataset IDs
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    :param dataset_ids: 数据集列表 IDs
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_ids:
         return False, 'Lack of "dataset_ids"'
 
@@ -754,13 +758,11 @@ def get_flattened_metadata(dataset_ids: list[str], tenant_id: str):
 
 
 def get_auto_metadata(dataset_id: str, tenant_id: str):
-    """
-    Get auto-metadata configuration for a dataset.
+    """获取数据集的自动元数据配置。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :return: (成功,结果)或(成功,error_message)"""
     kb = KnowledgebaseService.get_or_none(id=dataset_id, tenant_id=tenant_id)
     if kb is None:
         return False, f"User '{tenant_id}' lacks permission for dataset '{dataset_id}'"
@@ -769,14 +771,12 @@ def get_auto_metadata(dataset_id: str, tenant_id: str):
 
 
 async def update_auto_metadata(dataset_id: str, tenant_id: str, cfg: dict):
-    """
-    Update auto-metadata configuration for a dataset.
+    """更新数据集的自动元数据配置。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param cfg: auto-metadata configuration
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :param cfg: 自动元数据配置
+    :return: (成功,结果)或(成功,error_message)"""
     kb = KnowledgebaseService.get_or_none(id=dataset_id, tenant_id=tenant_id)
     if kb is None:
         return False, f"User '{tenant_id}' lacks permission for dataset '{dataset_id}'"
@@ -792,14 +792,12 @@ async def update_auto_metadata(dataset_id: str, tenant_id: str, cfg: dict):
 
 
 def delete_tags(dataset_id: str, tenant_id: str, tags: list[str]):
-    """
-    Delete tags from a dataset.
+    """从数据集中删除标签。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param tags: list of tags to delete
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :param Tags: 要删除的标签列表
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -833,22 +831,20 @@ def list_ingestion_logs(
     log_type: str = "dataset",
     keywords: str = None,
 ):
-    """
-    List ingestion logs for a dataset.
+    """列出数据集的摄取日志。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param page: page number
-    :param page_size: items per page
-    :param orderby: order by field
-    :param desc: descending order
-    :param operation_status: filter by operation status
-    :param create_date_from: filter start date
-    :param create_date_to: filter end date
-    :param log_type: "dataset" or "file"
-    :param keywords: search keywords for file logs
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数 dataset_id：数据集 ID
+    ：参数 tenant_id：租户 ID
+    :param page: 页码
+    :param page_size: 每页的项目
+    :param orderby: 按字段排序
+    :param desc: 降序
+    :param operation_status: 按运行状态过滤
+    :param create_date_from: 过滤器开始日期
+    ：参数 create_date_to：过滤器结束日期
+    ：参数 log_type："dataset" 或 "file"
+    :param keywords: 文件日志的搜索关键字
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -860,7 +856,7 @@ def list_ingestion_logs(
     allowed_log_types = {"dataset", "file"}
     if log_type not in allowed_log_types:
         logging.warning(
-            "list_ingestion_logs invalid log_type: dataset_id=%s tenant_id=%s log_type=%s",
+            "list_ingestion_logs 无效 log_type：dataset_id=%s 租户ID=%s log_type=%s",
             dataset_id,
             tenant_id,
             log_type,
@@ -868,7 +864,7 @@ def list_ingestion_logs(
         return False, 'Invalid "log_type", expected "dataset" or "file"'
 
     logging.info(
-        "list_ingestion_logs: dataset_id=%s tenant_id=%s log_type=%s page=%s page_size=%s",
+        "list_ingestion_logs: dataset_id=%s 租户ID=%s log_type=%s 页=%s page_size=%s",
         dataset_id,
         tenant_id,
         log_type,
@@ -884,14 +880,12 @@ def list_ingestion_logs(
 
 
 def get_ingestion_log(dataset_id: str, tenant_id: str, log_id: str):
-    """
-    Get a single ingestion log.
+    """获取单个摄取日志。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param log_id: log ID
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    ：参数 log_id：日志 ID
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -900,36 +894,34 @@ def get_ingestion_log(dataset_id: str, tenant_id: str, log_id: str):
 
     from api.db.services.pipeline_operation_log_service import PipelineOperationLogService
 
-    # Return the full record (including `dsl`) so the front-end dataflow-result
-    # page can render the pipeline timeline and chunks. The file-level field set
-    # is a superset of the dataset-level fields, so it is valid for both
-    # dataset-level (graph/raptor/mindmap) and per-file logs.
+    # 返回完整记录（包括`dsl`）所以前端dataflow-result
+    # 页面可以渲染管道时间轴和块。文件级字段集
+    # 是数据集级字段的超集，因此对两者都有效
+    # 数据集级 (graph/raptor/mindmap) 和每个文件日志。
     fields = PipelineOperationLogService.get_file_logs_fields()
     log = PipelineOperationLogService.model.select(*fields).where((PipelineOperationLogService.model.id == log_id) & (PipelineOperationLogService.model.kb_id == dataset_id)).first()
     if not log:
         return False, "Log not found"
 
     result = log.to_dict()
-    # Be explicit here: the dataflow-result page needs the full DSL payload to
-    # rebuild the timeline and right-side parser view. Some serialization paths
-    # can omit JSON fields from Peewee model dicts, so keep it attached here.
+    # 此处明确：数据流结果页面需要完整的 DSL 有效负载
+    # 重建时间线和右侧解析器视图。一些序列化路径
+    # 可以省略 Peewee 模型字典中的 JSON 字段，因此请将其保留在此处。
     result["dsl"] = log.dsl or {}
     return True, result
 
 
 def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = True):
-    """
-    Delete an indexing task (graph/raptor/mindmap) for a dataset.
+    """删除数据集的索引任务（graph/raptor/mindmap）。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param index_type: one of "graph", "raptor", "mindmap"
-    :param wipe: when True (default) the persisted artefacts (graph rows,
-        raptor summaries) are removed from the doc store and any GraphRAG
-        phase-completion markers are cleared.  Pass False to cancel the
-        running task while keeping prior progress so it can be resumed.
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    ：参数 index_type："graph"、"raptor"、"mindmap" 之一
+    ：参数擦除：当为真（默认）时，持久的人工制品（图形行，
+        raptor 摘要）已从文档存储中删除，并且任何 GraphRAG
+        阶段完成标记被清除。  传递 False 取消
+        运行任务，同时保持先前的进度，以便可以恢复。
+    :return: (成功,结果)或(成功,error_message)"""
     if index_type not in _VALID_INDEX_TYPES:
         return False, f"Invalid index type '{index_type}'. Must be one of {sorted(_VALID_INDEX_TYPES)}"
 
@@ -947,7 +939,7 @@ def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = 
     task_finish_at_field = f"{task_id_field.replace('_task_id', '_task_finish_at')}"
     task_id = getattr(kb, task_id_field, None)
 
-    logging.info("delete_index: dataset=%s index_type=%s wipe=%s", dataset_id, index_type, wipe)
+    logging.info("delete_index：数据集=%s index_type=%s擦除=%s", dataset_id, index_type, wipe)
 
     if task_id:
         from rag.utils.redis_conn import REDIS_CONN
@@ -963,10 +955,10 @@ def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = 
         from rag.nlp import search
 
         settings.docStoreConn.delete({"knowledge_graph_kwd": ["graph", "subgraph", "entity", "relation", "community_report"]}, search.index_name(kb.tenant_id), dataset_id)
-        # Wiping the graph invalidates any phase-completion markers used to
-        # short-circuit resolution / community detection on resume.
+        # 擦除图形会使用于的任何阶段完成标记无效
+        # 短路解决/恢复时的社区检测。
         clear_phase_markers(dataset_id)
-        logging.info("delete_index: cleared GraphRAG artefacts and phase markers for dataset=%s", dataset_id)
+        logging.info("delete_index：清除了数据集 = %s 的 GraphRAG 伪影和相位标记", dataset_id)
     elif wipe and index_type == "raptor":
         from rag.nlp import search
 
@@ -978,9 +970,9 @@ def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = 
     elif wipe and index_type in _STRUCTURE_INDEX_TYPES:
         from rag.nlp import search
 
-        # Wipe the merged KB-wide metadata and entity/relation rows for the
-        # requested kind (all kinds for the merge-all "structure" type). The
-        # per-document entity/relation rows the merge reads from are left intact.
+        # 擦除合并的 KB 范围元数据和 entity/relation 行
+        # 请求的种类（所有种类为合并所有 "structure" 类型）。这
+        # 每个文档 entity/relation 合并读取的行保持不变。
         friendly = _STRUCTURE_INDEX_TYPE_TO_KIND.get(index_type)
         resolved_kind = _resolve_dataset_structure_kind(friendly) if friendly else None
         conditions = [
@@ -997,15 +989,13 @@ def delete_index(dataset_id: str, tenant_id: str, index_type: str, wipe: bool = 
 
 
 def rename_tag(dataset_id: str, tenant_id: str, from_tag: str, to_tag: str):
-    """
-    Rename a tag in a dataset.
+    """重命名数据集中的标签。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param from_tag: original tag name
-    :param to_tag: new tag name
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :param from_tag: 原始标签名称
+    :param to_tag: 新标签名称
+    :return: (成功,结果)或(成功,error_message)"""
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
 
@@ -1028,14 +1018,12 @@ def rename_tag(dataset_id: str, tenant_id: str, from_tag: str, to_tag: str):
 
 
 async def search(dataset_id: str, tenant_id: str, req: dict):
-    """
-    Search (retrieval test) within a dataset.
+    """数据集中的 Search（检索测试）。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param req: search request
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :param req: 搜索请求
+    :return: (成功,结果)或(成功,error_message)"""
     from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type
     from api.db.services.doc_metadata_service import DocMetadataService
     from api.db.services.llm_service import LLMBundle
@@ -1047,7 +1035,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
     from rag.prompts.generator import cross_languages, keyword_extraction
 
     logging.debug(
-        "search(dataset=%s, tenant=%s, question_len=%s)",
+        "搜索（数据集=%s，租户=%s，question_len=%s）",
         dataset_id,
         tenant_id,
         len(req.get("question", "")),
@@ -1066,12 +1054,12 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
     langs = req.get("cross_languages", [])
 
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
-        logging.warning("search access denied: dataset=%s tenant=%s", dataset_id, tenant_id)
+        logging.warning("搜索访问被拒绝：数据集=%s 租户=%s", dataset_id, tenant_id)
         return False, "Only owner of dataset authorized for this operation."
 
     e, kb = KnowledgebaseService.get_by_id(dataset_id)
     if not e:
-        logging.warning("search dataset not found: dataset=%s", dataset_id)
+        logging.warning("搜索数据集未找到：数据集=%s\n未找到", dataset_id)
         return False, "Dataset not found!"
 
     if doc_ids is not None and not isinstance(doc_ids, list):
@@ -1085,7 +1073,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
     if search_id:
         search_detail = SearchService.get_detail(search_id)
         if not search_detail:
-            logging.warning("search config not found: search_id=%s", search_id)
+            logging.warning("搜索配置：搜索应用ID=%s", search_id)
             return False, "Invalid search_id"
         search_config = search_detail.get("search_config", {})
         meta_data_filter = search_config.get("meta_data_filter", {})
@@ -1096,7 +1084,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
         use_kg = search_config.get("use_kg", use_kg)
         langs = search_config.get("cross_languages", langs)
         logging.debug(
-            "Dataset search loaded Search config: search_id=%s dataset_id=%s vector_similarity_weight=%s full_text_weight=%s similarity_threshold=%s knn_top_k=%s",
+            "数据集搜索已加载 Search 配置：搜索应用ID=%s dataset_id=%s vector_similarity_weight=%s full_text_weight=%s similarity_threshold=%s knn_top_k=%s",
             search_id,
             dataset_id,
             vector_similarity_weight,
@@ -1183,7 +1171,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
             if ck["content_with_weight"]:
                 ranks["chunks"].insert(0, ck)
         except Exception:
-            logging.warning("search KG retrieval failed: dataset=%s tenant=%s", dataset_id, tenant_id, exc_info=True)
+            logging.warning("搜索 KG 检索失败：数据集=%s 租户=%s", dataset_id, tenant_id, exc_info=True)
     ranks["chunks"] = settings.retriever.retrieval_by_children(ranks["chunks"], tenant_ids)
     ranks["total"] = len(ranks["chunks"])
 
@@ -1195,15 +1183,13 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
 
 
 def check_embedding(dataset_id: str, tenant_id: str, req: dict):
-    """
-    Check embedding model compatibility by sampling random chunks,
-    re-embedding them with the new model, and computing cosine similarity.
+    """通过对随机块进行采样来检查嵌入模型的兼容性，
+    用新模型重新嵌入它们，并计算余弦相似度。
 
-    :param dataset_id: dataset ID
-    :param tenant_id: tenant ID
-    :param req: request body with embd_id
-    :return: (success, result) or (success, error_message)
-    """
+    ：参数dataset_id：数据集ID
+    ：参数 tenant_id：租户 ID
+    :param req: 请求主体为 embd_id
+    :return: (成功,结果)或(成功,error_message)"""
     import random
 
     import numpy as np
@@ -1264,7 +1250,7 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
         except Exception as e:
             if "not_found_exception" in repr(e) or "index_not_found_exception" in repr(e):
                 logging.info(
-                    "sample_random_chunks_with_vectors: index %s not yet created for tenant %s; returning empty sample set",
+                    "sample_random_chunks_with_vectors：尚未为租户 %s 创建索引 %s；返回空样本集",
                     index_nm,
                     tenant_id,
                 )
@@ -1338,7 +1324,7 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
     if not embd_id:
         return False, "`embd_id` is required."
 
-    logging.info("check_embedding: dataset=%s tenant=%s embd_id=%s", dataset_id, tenant_id, embd_id)
+    logging.info("check_embedding：数据集=%s租户=%s embd_id=%s", dataset_id, tenant_id, embd_id)
 
     ok, err = verify_embedding_availability(embd_id, tenant_id)
     if not ok:
@@ -1349,7 +1335,7 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
 
     n = int(req.get("check_num", 5))
     samples = sample_random_chunks_with_vectors(settings.docStoreConn, tenant_id=kb.tenant_id, kb_id=dataset_id, n=n)
-    logging.info("check_embedding: dataset=%s sampled=%d chunks", dataset_id, len(samples))
+    logging.info("check_embedding：数据集=%s采样=%d块", dataset_id, len(samples))
 
     results, eff_sims = [], []
     mode = "content_only"
@@ -1406,12 +1392,12 @@ def check_embedding(dataset_id: str, tenant_id: str, req: dict):
 
     data = {"summary": summary, "results": results}
     if not eff_sims:
-        logging.warning("check_embedding: dataset=%s no comparable chunks", dataset_id)
+        logging.warning("check_embedding：数据集=%s 没有可比较的块", dataset_id)
         return False, "No embedded chunks are available to compare."
     if summary["avg_cos_sim"] >= 0.9:
-        logging.info("check_embedding: dataset=%s compatible avg_cos_sim=%s valid=%d", dataset_id, summary["avg_cos_sim"], len(eff_sims))
+        logging.info("check_embedding：数据集=%s 兼容avg_cos_sim=%s 有效=%d", dataset_id, summary["avg_cos_sim"], len(eff_sims))
         return True, data
-    logging.warning("check_embedding: dataset=%s not_effective avg_cos_sim=%s valid=%d", dataset_id, summary["avg_cos_sim"], len(eff_sims))
+    logging.warning("check_embedding：数据集=%s not_effective avg_cos_sim=%s 有效=%d", dataset_id, summary["avg_cos_sim"], len(eff_sims))
     return "not_effective", {
         "code": RetCode.NOT_EFFECTIVE,
         "message": "Embedding model switch failed: the average similarity between old and new vectors is below 0.9, indicating incompatible vector spaces.",
@@ -1443,30 +1429,30 @@ async def search_datasets(tenant_id: str, req: dict):
     from rag.prompts.generator import cross_languages, keyword_extraction
 
     kb_ids = req.get("dataset_ids", [])
-    page = int(req.get("page", 1)) # 返回第几页
-    size = int(req.get("page_size") or req.get("size", 30)) # 每页数量，范围 1～100
-    rerank_candidates_count = int(req.get("rerank_candidates_count", 64)) # 进入最终重排流程的候选数量
-    question = req.get("question", "") # 用户查询文本
-    doc_ids = req.get("doc_ids", []) # 只检索指定文档；空数组表示不限定文档
-    use_kg = req.get("use_kg", False) # 是否额外执行知识图谱检索
-    similarity_threshold = float(req.get("similarity_threshold", 0.0)) # 最终相似度过滤阈值
-    vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3)) # 向量得分在混合得分中的权重
-    knn_top_k = max(1, min(int(req.get("knn_top_k", 1024)), 2048)) # 向量召回最多返回的候选数量
-    knn_num_candidates = int(req.get("knn_num_candidates", 2048)) # ES HNSW 搜索时考察的候选规模
-    langs = req.get("cross_languages", []) # 是否将问题转换为其他语言进行跨语言检索
+    page = int(req.get("page", 1))  # 返回第几页
+    size = int(req.get("page_size") or req.get("size", 30))  # 每页数量，范围 1～100
+    rerank_candidates_count = int(req.get("rerank_candidates_count", 64))  # 进入最终重排流程的候选数量
+    question = req.get("question", "")  # 用户查询文本
+    doc_ids = req.get("doc_ids", [])  # 只检索指定文档；空数组表示不限定文档
+    use_kg = req.get("use_kg", False)  # 是否额外执行知识图谱检索
+    similarity_threshold = float(req.get("similarity_threshold", 0.0))  # 最终相似度过滤阈值
+    vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3))  # 向量得分在混合得分中的权重
+    knn_top_k = max(1, min(int(req.get("knn_top_k", 1024)), 2048))  # 向量召回最多返回的候选数量
+    knn_num_candidates = int(req.get("knn_num_candidates", 2048))  # ES HNSW 搜索时考察的候选规模
+    langs = req.get("cross_languages", [])  # 是否将问题转换为其他语言进行跨语言检索
 
     logging.debug(
-        "search_datasets(datasets=%s, tenant=%s, question_len=%s)",
+        "search_datasets（数据集=%s，租户=%s，question_len=%s）",
         kb_ids,
         tenant_id,
         len(question),
     )
 
-    # Access check for all datasets
+    # 所有数据集的访问检查
     for kb_id in kb_ids:
         # 检查知识库权限
         if not KnowledgebaseService.accessible(kb_id, tenant_id):
-            logging.warning("search_datasets access denied: dataset=%s tenant=%s", kb_id, tenant_id)
+            logging.warning("search_datasets 访问被拒绝：数据集=%s 租户=%s", kb_id, tenant_id)
             return False, f"Only owner of dataset {kb_id} authorized for this operation."
     # 读取数据库配置
     kbs = KnowledgebaseService.get_by_ids(kb_ids)
@@ -1490,7 +1476,7 @@ async def search_datasets(tenant_id: str, req: dict):
     if search_id:
         search_detail = SearchService.get_detail(search_id)
         if not search_detail:
-            logging.warning("search config not found: search_id=%s", search_id)
+            logging.warning("搜索配置未找到：搜索应用ID=%s", search_id)
             return False, "Invalid search_id"
         search_config = search_detail.get("search_config", {})
         # 根据文档元数据过滤检索范围
@@ -1502,7 +1488,7 @@ async def search_datasets(tenant_id: str, req: dict):
         use_kg = search_config.get("use_kg", use_kg)
         langs = search_config.get("cross_languages", langs)
         logging.debug(
-            "Dataset search loaded Search config: search_id=%s dataset_ids=%s vector_similarity_weight=%s full_text_weight=%s similarity_threshold=%s knn_top_k=%s",
+            "数据集搜索已加载 Search 配置：搜索应用ID=%s dataset_ids=%s vector_similarity_weight=%s full_text_weight=%s similarity_threshold=%s knn_top_k=%s",
             search_id,
             kb_ids,
             vector_similarity_weight,
@@ -1525,7 +1511,7 @@ async def search_datasets(tenant_id: str, req: dict):
             chat_mdl = LLMBundle(tenant_id, chat_model_config)
 
     if meta_data_filter:
-        logging.debug("Metadata filter applied: %s, question length: %d, chat_mdl=%s", meta_data_filter, len(question), "None" if chat_mdl is None else "configured")
+        logging.debug("应用元数据过滤器：%s，问题长度：%d，chat_mdl=%s", meta_data_filter, len(question), "None" if chat_mdl is None else "configured")
         # 元数据过滤
         # 元数据过滤先在 MySQL 元数据层得到允许的 doc_id，随后把这些 ID 作为 ES filter；
         # 它不是相关性打分的一部分，而是在召回前缩小搜索空间。
@@ -1543,7 +1529,7 @@ async def search_datasets(tenant_id: str, req: dict):
     # SELECT * FROM user_tenant WHERE user_id = 当前用户ID;
     tenants = UserTenantService.query(user_id=tenant_id)
     for tenant in tenants:
-        if any(KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id) for kb_id in kb_ids): # 判断知识库是否属于当前租户
+        if any(KnowledgebaseService.query(tenant_id=tenant.tenant_id, id=kb_id) for kb_id in kb_ids):  # 判断知识库是否属于当前租户
             tenant_ids.append(tenant.tenant_id)
             break
     else:
@@ -1583,7 +1569,7 @@ async def search_datasets(tenant_id: str, req: dict):
     # 不记录问题原文、向量或 Chunk 正文，避免把用户数据写入常规服务日志；search_id 可用于
     # 将入口、Dealer.retrieval 和最终返回日志关联起来。
     logging.info(
-        "dataset_retrieval_started search_id=%s tenant_id=%s kb_ids=%s doc_filter_count=%d question_len=%d vector_weight=%.3f rerank=%s labels=%d",
+        "知识库检索已开始 检索ID=%s 租户ID=%s 知识库ID列表=%s 文档过滤数=%d 问题长度=%d 向量权重=%.3f 是否重排=%s 标签数=%d",
         search_id or "-",
         tenant_id,
         kb_ids,
@@ -1596,22 +1582,22 @@ async def search_datasets(tenant_id: str, req: dict):
 
     # 召回
     ranks = await settings.retriever.retrieval(
-        _question, # 最终用于检索的问题，可能已经经过翻译或关键词扩展
-        embd_mdl, # 将问题转换为向量的 Embedding 模型
-        tenant_ids, # 租户 ID，决定查询哪些 ES 索引
-        kb_ids, # 限定查询的知识库
-        page, # 最终结果页码
-        size, # 每页返回多少个 Chunk
-        similarity_threshold, # 最终相似度阈值
-        vector_similarity_weight, # 向量分数占比
-        doc_ids=local_doc_ids, # 可选，只检索指定文档
-        knn_top_k=knn_top_k, # ES KNN 最多召回多少个向量候选
-        knn_num_candidates=knn_num_candidates, # ES 每个分片内部用于近似搜索的候选规模
-        rerank_mdl=rerank_mdl, # 可选的专用重排模型
-        rank_feature=labels, # 标签特征
-        trace_id=search_id, # 仅用于串联当前检索配置/日志，方便排查一次检索链路
-        must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"}, # 排除某些类型的 Chunk
-        rerank_candidates_count=rerank_candidates_count, # 拉回应用层重新打分的候选数量，默认 64
+        _question,  # 最终用于检索的问题，可能已经经过翻译或关键词扩展
+        embd_mdl,  # 将问题转换为向量的 Embedding 模型
+        tenant_ids,  # 租户 ID，决定查询哪些 ES 索引
+        kb_ids,  # 限定查询的知识库
+        page,  # 最终结果页码
+        size,  # 每页返回多少个 Chunk
+        similarity_threshold,  # 最终相似度阈值
+        vector_similarity_weight,  # 向量分数占比
+        doc_ids=local_doc_ids,  # 可选，只检索指定文档
+        knn_top_k=knn_top_k,  # ES KNN 最多召回多少个向量候选
+        knn_num_candidates=knn_num_candidates,  # ES 每个分片内部用于近似搜索的候选规模
+        rerank_mdl=rerank_mdl,  # 可选的专用重排模型
+        rank_feature=labels,  # 标签特征
+        trace_id=search_id,  # 仅用于串联当前检索配置/日志，方便排查一次检索链路
+        must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"},  # 排除某些类型的 Chunk
+        rerank_candidates_count=rerank_candidates_count,  # 拉回应用层重新打分的候选数量，默认 64
     )
 
     if use_kg:
@@ -1623,7 +1609,7 @@ async def search_datasets(tenant_id: str, req: dict):
             if ck["content_with_weight"]:
                 ranks["chunks"].insert(0, ck)
         except Exception:
-            logging.warning("search_datasets KG retrieval failed: datasets=%s tenant=%s", kb_ids, tenant_id, exc_info=True)
+            logging.warning("search_datasets KG 检索失败：数据集=%s 租户=%s", kb_ids, tenant_id, exc_info=True)
     # 若命中母 Chunk/层级 Chunk，根据 mom_id 等关系转换为最终可展示的子 Chunk。
     ranks["chunks"] = settings.retriever.retrieval_by_children(ranks["chunks"], tenant_ids)
 
@@ -1633,7 +1619,7 @@ async def search_datasets(tenant_id: str, req: dict):
     ranks["labels"] = labels
 
     logging.info(
-        "dataset_retrieval_completed search_id=%s kb_ids=%s total=%d returned_chunks=%d",
+        "知识库检索完成 检索ID=%s 知识库ID列表=%s 命中总数=%d 返回切片数=%d",
         search_id or "-",
         kb_ids,
         ranks.get("total", 0),
@@ -1644,11 +1630,11 @@ async def search_datasets(tenant_id: str, req: dict):
 
 
 # ---------------------------------------------------------------------------
-# Artifact (knowledge compilation) page surface
+# 神器（知识汇编）页面
 #
-# These three helpers power the dataset-level "Artifact" tab. They query rows
-# with ``compile_kwd="wiki_page"`` written by TaskHandler's
-# ``persist_wiki_pages``. The schema fields they rely on are:
+# 这三个助手为数据集级 "Artifact" 选项卡提供支持。他们查询行
+# 与 TaskHandler 编写的“`compile_kwd="wiki_page"`”
+# ``persist_wiki_pages``。他们依赖的模式字段是：
 #   slug_kwd, title_kwd, page_type_kwd, content_with_weight,
 #   topic_kwd, entity_names_kwd, outlinks_kwd, related_kb_pages_kwd,
 #   source_chunk_ids, source_doc_ids
@@ -1659,9 +1645,9 @@ _SKILL_ALL_COMPILE_KWD = "skill_all"
 
 
 def _compiled_index_or_none(tenant_id: str, kb_id: str):
-    """Return (index_name, search_module) when the tenant index exists,
-    else ``None``. Avoids 500s on brand-new tenants whose ES index hasn't
-    been created yet."""
+    """当租户索引存在时返回(index_name, search_module)，
+    否则``None``。避免对 ES 索引未包含的全新租户收取 500 美元
+    尚未创建。"""
     from rag.nlp import search as _rag_search
 
     index_nm = _rag_search.index_name(tenant_id)
@@ -1685,9 +1671,9 @@ def _compilation_template_kind(kind) -> str:
 
 def _scalar(raw, default=""):
     """Infinity ``get_fields`` returns every ``*_kwd`` field as a list (split
-    on ``###``), even single scalar values like ``slug_kwd=["entity/foo"]``.
-    Normalize a field value that is expected to be a scalar identifier back to
-    the first non-empty element."""
+    on ``###``), even single scalar values like ``slug_kwd=["entity/foo"]``。
+    将预期为标量标识符的字段值规范化回
+    第一个非空元素。"""
     if isinstance(raw, (list, tuple)):
         for item in raw:
             if item not in (None, ""):
@@ -1697,7 +1683,7 @@ def _scalar(raw, default=""):
 
 
 def _string_list(raw) -> list[str]:
-    """Normalize native arrays and legacy JSON/Infinity string fields."""
+    """规范化本机数组和旧版 JSON/Infinity 字符串字段。"""
     if isinstance(raw, (list, tuple, set)):
         values = raw
     elif isinstance(raw, str):
@@ -1781,12 +1767,10 @@ def _extract_pipeline_compiler_group_ids(dsl) -> list[str]:
 
 
 def _normalize_template_kind(raw) -> str:
-    """Lowercase a template's raw kind WITHOUT folding.
+    """小写模板的原始类型 WITHOUT 折叠。
 
-    Unlike :func:`_compilation_template_kind` (which folds ``page_index`` /
-    ``knowledge_graph`` into ``timeline``), this keeps kinds distinct so the
-    alteration API can tell ``graph`` / ``timeline`` / ``tree`` apart.
-    """
+    与 :func:`_compilation_template_kind` （折叠``page_index`` /
+    ``knowledge_graph`` into ``timeline`ZXQKEEP00 170007ZXQ`graph`` / ``timeline`` / ``tree``分开。"""
     if not isinstance(raw, str):
         return ""
     return raw.strip().lower().replace("-", "_")
@@ -1854,11 +1838,10 @@ def _skill_index_or_none(tenant_id: str, kb_id: str):
 
 
 async def has_any_wiki(dataset_id: str, tenant_id: str):
-    """Fast existence probe for the sidebar tab visibility check.
+    """用于侧边栏选项卡可见性检查的快速存在探测。
 
-    Returns ``(True, {"has": bool})`` on success or ``(False, str)`` on
-    auth failure. Runs a ``limit=1`` search and reads only the total.
-    """
+    返回“`(True, {"has": bool})`` on success or ``(False, str)`` on
+    auth failure. Runs a ``limit=1`”搜索并仅读取总数。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -1883,19 +1866,19 @@ async def has_any_wiki(dataset_id: str, tenant_id: str):
             knowledgebase_ids=[dataset_id],
         )
     except Exception:
-        logging.exception("has_any_wiki: docStore search failed for kb=%s", dataset_id)
+        logging.exception("has_any_wiki：kb = %s 的 docStore 搜索失败", dataset_id)
         return True, {"has": False}
 
     total = settings.docStoreConn.get_total(res)
     return True, {"has": bool(total)}
 
 
-# Dataset-scope structure kinds the artifacts_structure API serves. Keys are the
-# friendly names the frontend passes; values are the template's *top-level* kind
-# as stamped on ``dataset_graph`` rows. The canonical names map to themselves so
-# a caller can pass either form. Note this deliberately does NOT reuse
-# ``_compilation_template_kind`` — that helper folds ``knowledge_graph`` into
-# ``timeline`` and would merge distinct kinds here.
+# 数据集范围结构类型为 artifacts_structure API 服务。按键是
+# 友好命名前端通行证；值是模板的*顶级*类型
+# 印在“`dataset_graph`”行上。规范名称映射到自身，因此
+# 调用者可以传递任一形式。请注意，这是故意重用 NOT
+# ``_compilation_template_kind`` — that helper folds ``knowledge_graph`` 进入
+# ``timeline`` 并将在这里合并不同的类型。
 _DATASET_STRUCTURE_ROW_KWD = "dataset_graph"
 _DATASET_STRUCTURE_KIND_ALIASES = {
     "graph": "knowledge_graph",
@@ -1916,14 +1899,14 @@ _DATASET_STRUCTURE_KIND_TO_INDEX_TYPE = {
 
 
 def _resolve_dataset_structure_kind(kind) -> str | None:
-    """Map a friendly/canonical kind string to the stored top-level kind."""
+    """将 friendly/canonical 种类字符串映射到存储的顶级种类。"""
     if not isinstance(kind, str):
         return None
     return _DATASET_STRUCTURE_KIND_ALIASES.get(kind.strip().lower().replace("-", "_"))
 
 
 def delete_dataset_structure(dataset_id: str, tenant_id: str, kind: str, wipe: bool = True):
-    """Delete the merged KB-wide structure rows for one artifacts_structure kind."""
+    """删除一种 artifacts_structure 种类的合并的 KB 范围的结构行。"""
     resolved_kind = _resolve_dataset_structure_kind(kind)
     if not resolved_kind:
         return False, f"Unsupported structure kind: {kind!r}. Expected one of: graph, mindmap, timeline, session_essence, session_graph."
@@ -1932,23 +1915,17 @@ def delete_dataset_structure(dataset_id: str, tenant_id: str, kind: str, wipe: b
 
 
 async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keywords: str = ""):
-    """Load the dataset-scope (KB-wide) structure graph for one ``kind``.
+    """加载一个数据集范围（KB-wide）结构图``kind``.
 
-    ``kind`` is one of ``graph`` / ``mindmap`` / ``timeline`` /
-    ``session_essence`` / ``session_graph``. The ``knowledge_graph_kwd="dataset_graph"``
+    ``kind`ZXQKEEP002 80004ZXQ`graph`` / ``mindmap`ZXQK EEP00280008ZXQ`timeline`` /
+    ``session_essence`` / ``session_graph``. The `ZXQKEEP00 280015ZXQ`
     blob rows (one per template, written by ``rebuild_dataset_structure_graph_json``)
     are used only to DISCOVER the requested kind's template buckets; each bucket's
-    entities/relations are then fetched from the raw KB-wide ``entity`` / ``relation``
-    rows with subgraph sampling — identical to the per-document endpoint but scoped
-    KB-wide (no ``doc_id`` filter), since dataset-merge templates dedup those rows
+    entities/relations are then fetched from the raw KB-wide `ZX QKEEP00280019ZXQ` / ``relation`ZXQKEEP0028002 2ZXQ`doc_id`` filter), since dataset-merge templates dedup those rows
     across documents.
 
-    ``keywords`` (optional): return the matching entities' subgraph, including
-    neighbors and touching relations, across the kind.
-
-    Returns ``(True, {"kind": <kind>, "templates": [...]})`` or
-    ``(False, message)`` on auth/validation failure.
-    """
+    ``keywords`ZXQKEEP 00280026ZXQ`(True, {"kind": <kind>, "templates": [...]})`` or
+    ``(False, message)``关于 auth/validation 故障。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
 
@@ -1974,9 +1951,9 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
     disabled_doc_ids = await _disabled_dataset_doc_ids(dataset_id)
     if not active_doc_ids:
         return True, empty
-    # Dataset rows use the KB id as ``doc_id``. If a historical row has no
-    # source provenance, exclude it while documents are disabled and fall back
-    # to active document rows instead of returning potentially stale content.
+    # 数据集行使用 KB id 作为“`doc_id`”。如果历史行没有
+    # 源出处，在文档被禁用并回退时将其排除
+    # 到活动文档行，而不是返回可能过时的内容。
     dataset_excluded_doc_ids = disabled_doc_ids | ({dataset_id} if disabled_doc_ids else set())
 
     def _row_template_id(row: dict) -> str | None:
@@ -1989,9 +1966,9 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             return raw.strip()
         return None
 
-    # Resolve a template's top-level kind + display name, memoized. Used both to
-    # label buckets and as a fallback for rows written before the kind stamp
-    # (they carry ``compilation_template_ids`` but no ``compilation_template_kind_kwd``).
+    # 解析模板的顶级种类+显示名称，已记忆。两者都用于
+    # 标签桶并作为在种类标记之前写入的行的后备
+    # （它们携带“`compilation_template_ids`` but no ``compilation_template_kind_kwd`”）。
     template_kind_cache: dict[str, str | None] = {}
     template_name_cache: dict[str, str] = {}
 
@@ -2007,7 +1984,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
                 top_kind = (saved.get("kind") or "").strip() or None
                 template_name_cache[tid] = saved.get("name") or tid
         except Exception:
-            logging.exception("get_dataset_structure: template lookup failed for %s", tid)
+            logging.exception("get_dataset_structure：%s 模板查找失败", tid)
         template_kind_cache[tid] = top_kind
         return top_kind
 
@@ -2020,13 +1997,12 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             "kind": row_kind or template_kind_cache.get(tid) or resolved_kind,
         }
 
-    # ── Discovery: the dataset-scoped rows the structure merge writes. ──
-    # ``run_structure_merge`` (rag.svr.task_executor_refactor.dataset_structure_merger)
-    # writes merged ``knowledge_graph_kwd="entity"/"relation"`` rows with
-    # ``scope_kwd="dataset"``, stamped with ``compilation_template_ids`` and the
-    # top-level ``compilation_template_kind_kwd``. Page through them (metadata
-    # fields only) to enumerate the distinct template ids whose top-level kind
-    # matches the request; ``build_bucket`` below then reads each template's rows.
+    # 发现由结构合并流程写入的知识库级记录。
+    # ``run_structure_merge``（位于 dataset_structure_merger）会写入合并后的
+    # ``knowledge_graph_kwd="entity"/"relation"`` 记录，并设置
+    # ``scope_kwd="dataset"``、``compilation_template_ids`` 和顶层
+    # ``compilation_template_kind_kwd``。这里只读取元数据字段，枚举符合请求类型的模板 ID；
+    # 后面的 ``build_bucket`` 再读取每个模板对应的完整记录。
     meta_fields = ["id", "compile_kwd", "compilation_template_ids", "compilation_template_kind_kwd"]
     page_size = 1000
 
@@ -2053,7 +2029,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
                 )
                 meta_rows = settings.docStoreConn.get_fields(res, meta_fields) or {}
             except Exception:
-                logging.exception("get_dataset_structure: docStore discovery failed for kb=%s scope=%s", dataset_id, scope_kwd)
+                logging.exception("get_dataset_structure：kb = %s 范围 = %s 的 docStore 发现失败", dataset_id, scope_kwd)
                 return [], False, pages
             if not meta_rows:
                 break
@@ -2086,8 +2062,8 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             template_scope_by_id[tid] = "doc"
             kind_template_ids.append(tid)
 
-    # Detect datasets that have ONLY the legacy dataset_graph blob (no
-    # entity/relation rows yet) so the fallback path below handles them.
+    # 检测具有 ONLY 旧版 dataset_graph blob 的数据集（无
+    # entity/relation 行尚未），因此下面的后备路径可以处理它们。
     if not kind_template_ids and not has_templateless:
         try:
             legacy_check = await thread_pool_exec(
@@ -2109,7 +2085,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             pass
 
     logging.debug(
-        "get_dataset_structure: discovered %d dataset template(s) and %d doc template(s) in %d/%d page(s) for kb=%s kind=%s",
+        "get_dataset_structure：在 %d/%d 页面中发现 %d 数据集模板和 %d 文档模板kb=%s 种类=%s",
         len(dataset_template_ids),
         len(doc_template_ids),
         dataset_pages,
@@ -2118,7 +2094,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
         resolved_kind,
     )
 
-    # ── keywords mode: name matching/KNN across the kind → matched subgraph. ──
+    # ── 关键字模式：跨种类→匹配子图命名matching/KNN。 ──
     if keywords:
         if not kind_template_ids:
             return True, empty
@@ -2126,7 +2102,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             model_config = resolve_model_config(kb.tenant_id, LLMType.EMBEDDING.value, kb.embd_id)
             embd_mdl = TenantLLMService.model_instance(model_config)
         except Exception:
-            logging.exception("get_dataset_structure: embedding bind failed for kb=%s", dataset_id)
+            logging.exception("get_dataset_structure：kb = %s 的嵌入绑定失败", dataset_id)
             return True, empty
 
         def _scope_for_template(row: dict):
@@ -2161,7 +2137,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
         bucket["relations"] = kw_relations
         return True, {"kind": kind, "templates": [bucket]}
 
-    # ── normal mode: per-template subgraph sampling from raw KB-wide rows. ──
+    # ── 正常模式：从原始 KB 宽行中采样每个模板子图。 ──
     templates_out: list[dict] = []
     for tid in kind_template_ids:
         scope_kwd = template_scope_by_id.get(tid, "dataset")
@@ -2176,7 +2152,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
                 excluded_doc_ids=dataset_excluded_doc_ids if scope_kwd == "dataset" else disabled_doc_ids,
             )
         except Exception:
-            logging.exception("get_dataset_structure: bucket build failed for kb=%s template=%s", dataset_id, tid)
+            logging.exception("get_dataset_structure：kb=%s 模板=%s 的存储桶构建失败", dataset_id, tid)
             continue
         if resolved_kind in {"knowledge_graph", "mind_map", "timeline"}:
             entities = sgc.filter_entities_with_relations(entities, relations)
@@ -2187,9 +2163,9 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
         meta = _bucket_meta_for(tid)
         templates_out.append({**meta, "entities": entities, "relations": relations})
 
-    # Legacy template-less dataset_graph rows have no template id to scope raw
-    # rows by, so fall back to their blob content directly (no sampling). Rare —
-    # rebuild_dataset_structure_graph_json always stamps a template id.
+    # 传统无模板 dataset_graph 行没有模板 ID 来限定原始范围
+    # 行通过，因此直接回退到其 blob 内容（无采样）。罕见——
+    # rebuild_dataset_structure_graph_json 始终标记模板 id。
     if has_templateless:
         try:
             res_l = await thread_pool_exec(
@@ -2206,7 +2182,7 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
             )
             legacy_rows = settings.docStoreConn.get_fields(res_l, ["content_with_weight", "compilation_template_kind_kwd", "compile_kwd"]) or {}
         except Exception:
-            logging.exception("get_dataset_structure: legacy blob fetch failed for kb=%s", dataset_id)
+            logging.exception("get_dataset_structure：kb=%s 的旧版 blob 获取失败", dataset_id)
             legacy_rows = {}
         legacy_bucket = {"template_id": f"kind:{resolved_kind}", "template_name": f"kind:{resolved_kind}", "kind": resolved_kind, "entities": [], "relations": []}
         reconstructed_compile_kwds: set[str] = set()
@@ -2250,15 +2226,15 @@ async def get_dataset_structure(dataset_id: str, tenant_id: str, kind: str, keyw
     return True, {"kind": kind, "templates": templates_out}
 
 
-# ── artifacts/alteration: per-``kind`` provenance & eligibility mapping ──
+# ── artifacts/alteration：根据“`kind`”来源和资格映射 ──
 #
-# Alteration is a pure set operation shared by every kind:
-#   removed        = involved (product provenance) − current (dataset docs)
-#   newly_uploaded = eligible (should be compiled) − involved
-# Only two inputs vary by kind: how ``involved`` provenance is gathered, and
-# which template kinds make a doc ``eligible``.
+# Alteration 是各种共享的纯集运算：
+# 已删除 = 涉及（产品出处）− 当前（数据集文档）
+# newly_uploaded = 合格（应编译）− 涉及
+# 只有两个输入因种类而异：如何收集“`involved`”出处，以及
+# 哪些模板类型生成文档“`eligible`”。
 
-# Non-folded template kinds that make a doc eligible for each API kind.
+# 非折叠模板类型，使文档适合每种 API 类型。
 _ALTERATION_ELIGIBLE_TEMPLATE_KINDS = {
     "wiki": {"wiki"},
     "graph": {"knowledge_graph"},
@@ -2267,23 +2243,23 @@ _ALTERATION_ELIGIBLE_TEMPLATE_KINDS = {
     "tree": {"tree", "page_index"},
 }
 
-# Dataset-merged structure kinds carry provenance in ``source_doc_ids`` or
-# ``doc_ids_kwd`` on ``scope_kwd="dataset"`` rows, discovered by their stamped
-# top-level kind.
+# 数据集合并结构类型的来源为“`source_doc_ids`”或
+# ``doc_ids_kwd`` on ``scope_kwd="dataset"`` 行，通过其标记发现
+# 顶级种。
 _ALTERATION_KIND_TO_MERGED_ROW_KIND = {
     "graph": "knowledge_graph",
     "mindmap": "mind_map",
     "timeline": "timeline",
 }
 
-# Per-document structure kinds keep one product row per document; provenance is
-# the row's own ``doc_id`` (no dataset merge, no ``source_doc_ids``). ``tree`` and
-# ``page_index`` write distinct ``compile_kwd`` values.
+# 每文档结构类型为每个文档保留一个产品行；出处是
+# 该行自己的 ``doc_id`` (no dataset merge, no ``source_doc_ids``). ``tree`` 和
+# ``page_index`` write distinct ``compile_kwd`` 值。
 _ALTERATION_TREE_COMPILE_KWDS = ["tree", "page_index"]
 
 
 async def _current_dataset_docs(dataset_id: str):
-    """Return ``(docs, current_doc_id_set)`` for the dataset."""
+    """返回数据集的“`(docs, current_doc_id_set)`”。"""
     docs, _ = await thread_pool_exec(
         DocumentService.get_by_kb_id,
         kb_id=dataset_id,
@@ -2307,7 +2283,7 @@ async def _disabled_dataset_doc_ids(dataset_id: str) -> set[str]:
 
 
 def _alteration_result(current_doc_ids: set, involved_doc_ids: set, eligible_doc_ids: set) -> dict:
-    """Build the drift response dict shared by every ``kind``."""
+    """构建每个“`kind`”共享的漂移响应字典。"""
     removed_doc_ids = sorted(involved_doc_ids - current_doc_ids)
     newly_uploaded_doc_ids = sorted(eligible_doc_ids - involved_doc_ids)
     return {
@@ -2326,16 +2302,15 @@ async def _wiki_chunk_alteration(
     eligible_doc_ids: set[str],
     involved_doc_ids: set[str],
 ) -> dict:
-    """Compare active source chunks with the hashes used by Wiki MAP.
+    """将活动源块与 Wiki MAP 使用的哈希值进行比较。
 
-    Document-level provenance cannot detect an edited, added, or removed
-    chunk.  The MAP resume rows already contain the exact chunk hash used by
-    compilation, so they are the authoritative compiled-side snapshot.
-    A previously involved document is changed when a chunk is added, removed,
-    or has a different hash. Documents removed or disabled at document level
-    remain represented by the existing ``removed`` fields rather than being
-    duplicated in ``changed``.
-    """
+    Document级别出处无法检测到编辑、添加或删除
+    块。  MAP 简历行已包含由
+    编译，因此它们是权威的编译端快照。
+    当添加、删除块时，先前涉及的文档会发生更改，
+    或者有不同的哈希值。在文档级别删除或禁用文档
+    仍然由现有的“`removed`` fields rather than being
+    duplicated in ``changed`”表示。"""
     empty = {
         "changed": 0,
         "changed_doc_ids": [],
@@ -2353,16 +2328,16 @@ async def _wiki_chunk_alteration(
         current = await _wiki_scan_current_chunk_state(tenant_id, dataset_id, eligible_doc_ids)
         previous = await _wiki_load_active_map_state(tenant_id, dataset_id)
     except Exception as exc:
-        logging.exception("alteration: failed to compare Wiki chunk state for kb=%s", dataset_id)
+        logging.exception("变更：无法比较 kb=%s 的 Wiki 块状态", dataset_id)
         raise RuntimeError(f"Failed to compare Wiki chunk state for alteration (kb={dataset_id})") from exc
 
     delta = _wiki_compare_chunk_states(previous, current)
     changed_doc_ids = {
         str((current.get(chunk_id) or previous.get(chunk_id) or {}).get("doc_id") or "") for chunk_id in delta["new_chunk_ids"] | delta["changed_chunk_ids"] | delta["deleted_chunk_ids"]
     }
-    # ``newly_uploaded`` owns eligible documents which have not contributed to
-    # the current Wiki; ``removed`` owns previously involved documents which
-    # are no longer eligible. Keep ``changed`` disjoint from both categories.
+    # ``newly_uploaded`` 拥有未促成的合格文件
+    # 当前维基； “`removed`”拥有先前涉及的文件
+    # 不再符合资格。保持“`changed`”与两个类别不相交。
     changed_doc_ids &= eligible_doc_ids & involved_doc_ids
 
     return {
@@ -2372,7 +2347,7 @@ async def _wiki_chunk_alteration(
 
 
 def _flatten_provenance_doc_ids(value) -> set[str]:
-    """Normalize source_doc_ids stored as JSON strings, lists, or scalars."""
+    """将 source_doc_ids 标准化存储为 JSON 字符串、列表或标量。"""
     if value is None:
         return set()
     if isinstance(value, str):
@@ -2392,7 +2367,7 @@ def _flatten_provenance_doc_ids(value) -> set[str]:
 
 
 def _eligible_doc_ids_for_kind(docs, tenant_id: str, kind: str) -> set:
-    """Doc ids whose parser_config or pipeline carries a template of ``kind``."""
+    """parser_config 或管道携带“`kind`”模板的文档 ID。"""
     accepted = _ALTERATION_ELIGIBLE_TEMPLATE_KINDS.get(kind) or set()
     template_cache: dict[str, bool] = {}
     group_cache: dict[str, bool] = {}
@@ -2414,11 +2389,10 @@ def _eligible_doc_ids_for_kind(docs, tenant_id: str, kind: str) -> set:
 
 
 async def _involved_doc_ids_paged(index_nm, dataset_id: str, condition: dict, field: str | list[str], from_list: bool) -> set:
-    """Page a docStore search, folding provenance fields into a doc-id set.
+    """对 docStore 搜索进行分页，将出处字段折叠到 doc-id 集中。
 
-    ``from_list`` reads the selected fields as lists of provenance document IDs;
-    otherwise the selected field is the row's own scalar document ID.
-    """
+    ``from_list`` 将所选字段读取为出处文档 IDs 的列表；
+    否则，所选字段是该行自己的标量文档 ID。"""
     from common.doc_store.doc_store_base import OrderByExpr
 
     involved: set[str] = set()
@@ -2442,7 +2416,7 @@ async def _involved_doc_ids_paged(index_nm, dataset_id: str, condition: dict, fi
             )
             rows = settings.docStoreConn.get_fields(res, select_fields) or {}
         except Exception:
-            logging.exception("alteration: docStore search failed for kb=%s cond=%s", dataset_id, condition)
+            logging.exception("更改：kb=%s cond=%s 的 docStore 搜索失败", dataset_id, condition)
             rows = {}
 
         if not rows:
@@ -2462,7 +2436,7 @@ async def _involved_doc_ids_paged(index_nm, dataset_id: str, condition: dict, fi
 
 
 async def _involved_doc_ids_for_kind(index_nm, dataset_id: str, kind: str) -> set:
-    """Gather the doc ids baked into the compiled product for ``kind``."""
+    """收集“`kind`”编译产品中的文档 ID。"""
     if kind == "wiki":
         return await _involved_doc_ids_paged(index_nm, dataset_id, {"compile_kwd": [WIKI_PAGE_COMPILE_KWD]}, "source_doc_ids", from_list=True)
     if kind in _ALTERATION_KIND_TO_MERGED_ROW_KIND:
@@ -2475,10 +2449,10 @@ async def _involved_doc_ids_for_kind(index_nm, dataset_id: str, kind: str) -> se
         if involved:
             return involved
 
-        # Historical dataset rows may predate provenance columns. Recover the
-        # source document set from their template/compile identity so alteration
-        # still reports disabled documents instead of treating every active
-        # document as newly uploaded.
+        # 历史数据集行可能早于出处列。恢复
+        # 源文件集由其 template/compile 身份进行修改
+        # 仍然报告禁用文档而不是处理每个活动文档
+        # 文件为新上传的。
         template_ids = await _involved_doc_ids_paged(index_nm, dataset_id, condition, "compilation_template_ids", from_list=True)
         compile_kwds = await _involved_doc_ids_paged(index_nm, dataset_id, condition, "compile_kwd", from_list=True)
         if not template_ids and not compile_kwds:
@@ -2504,7 +2478,7 @@ async def _involved_doc_ids_for_kind(index_nm, dataset_id: str, kind: str) -> se
 
 
 async def _get_alteration(dataset_id: str, tenant_id: str, kind: str):
-    """Shared driver: doc-level drift between the ``kind`` product and the dataset."""
+    """共享驱动程序：“`kind`”产品和数据集之间的文档级漂移。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     ok, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2528,9 +2502,10 @@ async def _get_alteration(dataset_id: str, tenant_id: str, kind: str):
                 involved_doc_ids,
             )
 
-    # Wiki membership follows compilation eligibility. Disabling a document or
-    # removing its Wiki template is therefore a removal; enabling it again or
-    # restoring the template after a rebuild makes it newly uploaded.
+    # Wiki 会员资格遵循编译资格。禁用文档或
+    # 因此，
+    # 删除其 Wiki 模板就是删除；再次启用它或
+    # 重建后恢复模板使其重新上传。
     alteration_current_doc_ids = eligible_doc_ids if kind == "wiki" else current_doc_ids
     result = _alteration_result(alteration_current_doc_ids, involved_doc_ids, eligible_doc_ids)
     if chunk_changes is not None:
@@ -2539,17 +2514,15 @@ async def _get_alteration(dataset_id: str, tenant_id: str, kind: str):
 
 
 async def get_wiki_alteration(dataset_id: str, tenant_id: str):
-    """Return doc-level drift between current dataset docs and compiled wiki provenance."""
+    """返回当前数据集文档和编译的 wiki 出处之间的文档级偏差。"""
     return await _get_alteration(dataset_id, tenant_id, "wiki")
 
 
 async def get_structure_alteration(dataset_id: str, tenant_id: str, kind: str):
-    """Return doc-level drift for a non-wiki structure ``kind``.
+    """返回非 wiki 结构的文档级漂移``kind``.
 
-    ``kind`` is one of ``graph`` / ``mindmap`` / ``timeline`` (dataset-merged
-    products, provenance from ``source_doc_ids``) or ``tree`` (per-document
-    products covering ``tree`` + ``page_index``, provenance from ``doc_id``).
-    """
+    ``kind`` is one of `ZXQKEEP004500 04ZXQ` / ``mindmap`` / ``timeline`ZXQKEEP004 50009ZXQ`source_doc_ids``) or ``tree`` (per-document
+    products covering `ZXQKEE P00450014ZXQ` + ``page_index``, provenance from ``doc_id``)。"""
     kind = (kind or "").strip().lower()
     if kind not in _ALTERATION_KIND_TO_MERGED_ROW_KIND and kind != "tree":
         return False, f"Unsupported structure kind: {kind!r}. Expected one of: graph, mindmap, timeline, tree."
@@ -2565,12 +2538,11 @@ async def list_wiki_pages(
     topic: str | None = None,
     keywords: str = "",
 ):
-    """List artifact pages for the left-hand 2-column list.
+    """列出左侧 2 列列表的工件页面。
 
-    Returns ``(True, {"total", "items": [{slug, title, page_type}, ...]})``.
-    Ordering: ``page_type`` ascending, then ``title`` ascending — keeps
-    pages of the same type grouped together visually.
-    """
+    返回 ``(True, {"total", "items": [{slug, title, page_type}, ...]})``.
+    Ordering: ``page_type`` ascending, then ``title`` 升序 — 保持
+    相同类型的页面在视觉上分组在一起。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2597,12 +2569,12 @@ async def list_wiki_pages(
 
     order_by = OrderByExpr()
     try:
-        # Most-connected pages first: outlinks_int = len(outlinks_kwd) is
-        # written by the persistence layer for exactly this query.
+        # 最常连接的页面在前： outlinks_int = len(outlinks_kwd) 是
+        # 是由持久层为这个查询编写的。
         order_by.desc("outlinks_int").asc("title_kwd")
     except Exception:
-        # OrderByExpr API differs across doc-store backends; degrade to
-        # default order rather than 500.
+        # OrderByExpr API 在文档存储后端之间有所不同；降级为
+        # 默认顺序而不是 500。
         order_by = OrderByExpr()
 
     select_fields = [
@@ -2644,10 +2616,10 @@ async def list_wiki_pages(
             items = [item for row in (field_map or {}).values() if (item := _to_item(row)) is not None]
             total = settings.docStoreConn.get_total(res)
         else:
-            # Wiki list search is intentionally metadata-based. These fields
-            # are available on existing rows and behave consistently across
-            # every document-store backend, unlike a full-text query over
-            # backend-specific token fields.
+            # Wiki 列表搜索有意基于元数据。这些领域
+            # 可用于现有行，并且在整个行中表现一致
+            # 每个文档存储后端，与全文查询不同
+            # 后端特定的令牌字段。
             matched_items = []
             batch_size = 1000
             search_offset = 0
@@ -2677,7 +2649,7 @@ async def list_wiki_pages(
             total = len(matched_items)
             items = matched_items[offset : offset + page_size]
     except Exception:
-        logging.exception("list_wiki_pages: docStore search failed for kb=%s", dataset_id)
+        logging.exception("list_wiki_pages：kb = %s 的 docStore 搜索失败", dataset_id)
         return True, {"total": 0, "items": []}
 
     return True, {"total": int(total or 0), "items": items}
@@ -2690,7 +2662,7 @@ async def list_wiki_topics(
     page_size: int = 200,
     keywords: str = "",
 ):
-    """List wiki topics for the dataset Artifact tab."""
+    """列出数据集 Artifact 选项卡的 wiki 主题。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2722,14 +2694,14 @@ async def list_wiki_topics(
         )
         buckets = settings.docStoreConn.get_aggregation(agg_res, "topic_kwd")
     except Exception:
-        logging.exception("list_wiki_topics: docStore aggregation failed for kb=%s", dataset_id)
+        logging.exception("list_wiki_topics：kb=%s 的 docStore 聚合失败", dataset_id)
         return True, {"total": 0, "items": []}
 
     counts = {t: int(c) for t, c in (buckets or []) if isinstance(t, str) and t and int(c or 0) > 0}
     if not counts:
         return True, {"total": 0, "items": []}
 
-    # Rank topics by page count (descending), then title for a stable order.
+    # 按页数（降序）对主题进行排名，然后是标题以获得稳定的顺序。
     ranked = sorted(
         (
             {
@@ -2774,7 +2746,7 @@ async def list_wiki_topics(
                     break
                 child_offset += batch_size
         except Exception:
-            logging.exception("list_wiki_topics: child-page keyword lookup failed for kb=%s", dataset_id)
+            logging.exception("list_wiki_topics：kb=%s 的子页面关键字查找失败", dataset_id)
 
         ranked = [item for item in ranked if item["topic"] in matching_topics]
 
@@ -2789,15 +2761,14 @@ async def get_wiki_page(
     page_type: str,
     slug: str,
 ):
-    """Fetch a single artifact page for the right-hand markdown viewer.
+    """为右侧 Markdown 查看器获取单个工件页面。
 
     ``slug`` is the tail after ``<page_type>/`` — i.e. the URL component
     that came from the markdown link ``artifact/<kb_id>/<page_type>/<slug>``.
-    The stored ``slug_kwd`` is the full ``<page_type>/<slug>`` form, so we
+    The stored `ZXQKEEP00 010006ZXQ` is the full ``<page_type>/<slug>`` form, so we
     reconstruct it before the lookup.
 
-    Returns ``(True, page_dict)`` or ``(True, None)`` when no row matches.
-    """
+    Returns ``(True, page_dict)`` or ``(True, None)``当没有行匹配时。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2844,7 +2815,7 @@ async def get_wiki_page(
         field_map = settings.docStoreConn.get_fields(res, select_fields)
     except Exception:
         logging.exception(
-            "get_wiki_page: search failed for kb=%s slug=%s",
+            "get_wiki_page：搜索 kb=%s slug=%s 失败",
             dataset_id,
             full_slug,
         )
@@ -2854,8 +2825,8 @@ async def get_wiki_page(
         return True, None
 
     _, row = next(iter(field_map.items()))
-    # The incremental writer stores page body in md_with_weight; fall back to
-    # content_with_weight for any rows written by the legacy path.
+    # 增量写入器将页体存储在md_with_weight中；回落到
+    # content_with_weight 用于旧路径写入的任何行。
     content_md = row.get("md_with_weight") or row.get("content_with_weight") or ""
     summary = row.get("summary_with_weight") or ""
     return True, {
@@ -2874,7 +2845,7 @@ async def get_wiki_page(
 
 
 async def has_any_skill(dataset_id: str, tenant_id: str):
-    """Fast existence probe for the dataset Skills sidebar entry."""
+    """数据集技能侧边栏条目的快速存在探测。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2899,7 +2870,7 @@ async def has_any_skill(dataset_id: str, tenant_id: str):
             knowledgebase_ids=[dataset_id],
         )
     except Exception:
-        logging.exception("has_any_skill: docStore search failed for kb=%s", dataset_id)
+        logging.exception("has_any_skill：kb=%s 的 docStore 搜索失败", dataset_id)
         return True, {"has": False}
 
     total = settings.docStoreConn.get_total(res)
@@ -2907,7 +2878,7 @@ async def has_any_skill(dataset_id: str, tenant_id: str):
 
 
 async def get_skill_tree(dataset_id: str, tenant_id: str):
-    """Fetch the one-shot recursive skill tree for this dataset."""
+    """获取该数据集的一次性递归技能树。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2934,7 +2905,7 @@ async def get_skill_tree(dataset_id: str, tenant_id: str):
         )
         field_map = settings.docStoreConn.get_fields(res, select_fields)
     except Exception:
-        logging.exception("get_skill_tree: docStore search failed for kb=%s", dataset_id)
+        logging.exception("get_skill_tree：kb = %s 的 docStore 搜索失败", dataset_id)
         return True, None
 
     if not field_map:
@@ -2951,11 +2922,10 @@ async def get_skill_tree(dataset_id: str, tenant_id: str):
 
 
 async def delete_skills(dataset_id: str, tenant_id: str):
-    """Delete every compiled skill row (``skill`` + ``skill_all``) for a dataset.
+    """删除所有已编译的技能行(``skill`` + ``skill_all``) for a dataset.
 
     Returns ``(True, {"deleted": <n>})`` on success. When the tenant index does
-    not exist yet there is nothing to delete, so it succeeds with ``0``.
-    """
+    not exist yet there is nothing to delete, so it succeeds with ``0``."""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -2972,25 +2942,24 @@ async def delete_skills(dataset_id: str, tenant_id: str):
             dataset_id,
         )
     except Exception:
-        logging.exception("delete_skills: docStore delete failed for kb=%s", dataset_id)
+        logging.exception("delete_skills：kb = %s 的 docStore 删除失败", dataset_id)
         return False, "Failed to delete skills."
 
-    # Clear the skill compilation markers so the dataset reflects "no skill"
-    # (and a later re-compile isn't short-circuited by a stale task id).
+    # 清除技能编译标记，以便数据集反映 "no skill"
+    # （并且稍后的重新编译不会因过时的任务 ID 而短路）。
     try:
         KnowledgebaseService.update_by_id(kb.id, {"skill_task_id": "", "skill_task_finish_at": None})
     except Exception:
-        logging.exception("delete_skills: failed clearing skill task markers for kb=%s", dataset_id)
+        logging.exception("delete_skills：kb=%s 的技能任务标记清除失败", dataset_id)
 
     return True, {"deleted": int(deleted or 0)}
 
 
 def _parse_list_field(value):
-    """Normalize a search-result ``_kwd`` field to a Python list.
+    """规范化搜索结果“`_kwd`` field to a Python list.
 
-    Infinity stores keyword fields as ``###``-joined strings;
-    ES / OpenSearch / OceanBase keep native lists.
-    """
+    Infinity stores keyword fields as ``###`”连接的字符串；
+    ES / OpenSearch / OceanBase 保留本机列表。"""
     if isinstance(value, list):
         return [v for v in value if v]
     if isinstance(value, str) and value:
@@ -2999,11 +2968,10 @@ def _parse_list_field(value):
 
 
 def _walk_skill_tree(tree: list[dict], target_kwd: str, parent_kwd: str | None = None):
-    """Depth-first search through the ``skill_all`` tree JSON.
+    """通过``skill_all`` tree JSON.
 
-    Returns ``(parent_kwd, found_node)`` or ``(None, None)`` when *target_kwd*
-    is not present in the tree.
-    """
+    Returns ``(parent_kwd, found_node)`` or ``(None, None)``时进行深度优先搜索*target_kwd*
+    不存在于树中。"""
     for node in tree:
         if node.get("skill_kwd") == target_kwd:
             return parent_kwd, node
@@ -3017,7 +2985,7 @@ def _walk_skill_tree(tree: list[dict], target_kwd: str, parent_kwd: str | None =
 
 
 def _collect_tree_descendants(node: dict) -> set[str]:
-    """Return all ``skill_kwd`` values from *node*'s subtree (recursive)."""
+    """从 *node* 的子树返回所有 ``skill_kwd`` 值（递归）。"""
     result: set[str] = set()
     for child in node.get("children_kwd", []):
         kwd = child.get("skill_kwd", "")
@@ -3028,7 +2996,7 @@ def _collect_tree_descendants(node: dict) -> set[str]:
 
 
 def _prune_skill_tree(tree: list[dict], deleted_kwds: set[str]) -> list[dict]:
-    """Remove nodes whose ``skill_kwd`` is in *deleted_kwds* (and their subtrees)."""
+    """删除 *deleted_kwds* 中包含 ``skill_kwd`` 的节点（及其子树）。"""
     result = []
     for node in tree:
         if node.get("skill_kwd") in deleted_kwds:
@@ -3040,14 +3008,13 @@ def _prune_skill_tree(tree: list[dict], deleted_kwds: set[str]) -> list[dict]:
 
 
 async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
-    """Delete a compiled skill node and its descendants.
+    """删除已编译的技能节点及其后代。
 
-    1. Walk the ``skill_all`` tree to identify the target node, its parent,
+    1. 步行``skill_all`` tree to identify the target node, its parent,
        and all descendant ``skill_kwd`` values.
-    2. Delete every matching ``compile_kwd="skill"`` row (self + subtree).
+    2. Delete every matching `ZXQKEEP00 180004ZXQ` row (self + subtree).
     3. If a parent exists, remove the deleted node from its ``children_kwd``.
-    4. Prune the ``skill_all`` tree and rewrite the aggregate row.
-    """
+    4. Prune the ``skill_all``树并重写聚合行。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -3058,7 +3025,7 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
     index_nm, _ = pack
 
     # ------------------------------------------------------------------
-    # 1. Read current skill_all tree
+    # 1.读取当前skill_all树
     # ------------------------------------------------------------------
     from common.doc_store.doc_store_base import OrderByExpr
 
@@ -3077,7 +3044,7 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
         )
         field_map = settings.docStoreConn.get_fields(res, _ALL_SELECT)
     except Exception:
-        logging.exception("delete_skill: read skill_all failed kb=%s skill=%s", dataset_id, skill_kwd)
+        logging.exception("delete_skill：读取skill_all失败kb=%s技能=%s", dataset_id, skill_kwd)
         return False, "Failed to read skill tree."
 
     if not field_map:
@@ -3089,11 +3056,11 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
     tree = tree if isinstance(tree, list) else [tree]
 
     # ------------------------------------------------------------------
-    # 2. Locate target node and collect descendants
+    # 2. 定位目标节点并收集后代
     # ------------------------------------------------------------------
     parent_kwd, found_node = _walk_skill_tree(tree, skill_kwd)
     if found_node is None:
-        # Fallback: node not tracked in the tree; try direct delete anyway.
+        # Fallback：树中未跟踪节点；无论如何尝试直接删除。
         try:
             deleted = settings.docStoreConn.delete(
                 {"compile_kwd": [_SKILL_COMPILE_KWD], "skill_kwd": [skill_kwd]},
@@ -3101,7 +3068,7 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
                 dataset_id,
             )
         except Exception:
-            logging.exception("delete_skill: fallback delete failed kb=%s skill=%s", dataset_id, skill_kwd)
+            logging.exception("delete_skill：回退删除失败kb = %s技能= %s", dataset_id, skill_kwd)
             return False, "Failed to delete skill."
         return True, {"deleted": int(deleted or 0)}
 
@@ -3109,7 +3076,7 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
     all_kwds = [skill_kwd] + sorted(descendant_kwds)
 
     # ------------------------------------------------------------------
-    # 3. Delete compile_kwd="skill" rows (self + all descendants)
+    # 3.删除compile_kwd="skill"行（自身+所有后代）
     # ------------------------------------------------------------------
     try:
         deleted = settings.docStoreConn.delete(
@@ -3118,11 +3085,11 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
             dataset_id,
         )
     except Exception:
-        logging.exception("delete_skill: delete failed kb=%s skill=%s kwds=%s", dataset_id, skill_kwd, all_kwds)
+        logging.exception("delete_skill：删除失败kb=%s技能=%s kwds=%s", dataset_id, skill_kwd, all_kwds)
         return False, "Failed to delete skill."
 
     # ------------------------------------------------------------------
-    # 4. Update parent's children_kwd
+    # 4.更新父级的children_kwd
     # ------------------------------------------------------------------
     if parent_kwd:
         _NODE_SELECT = [
@@ -3152,7 +3119,7 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
             )
             fm = settings.docStoreConn.get_fields(res, _NODE_SELECT)
         except Exception:
-            logging.exception("delete_skill: read parent failed kb=%s parent=%s", dataset_id, parent_kwd)
+            logging.exception("delete_skill：读取父级失败 kb=%s 父级=%s", dataset_id, parent_kwd)
         else:
             if fm:
                 _, parent_row = next(iter(fm.items()))
@@ -3161,10 +3128,10 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
                 try:
                     settings.docStoreConn.insert([parent_row], index_nm, dataset_id)
                 except Exception:
-                    logging.exception("delete_skill: update parent children_kwd failed kb=%s parent=%s", dataset_id, parent_kwd)
+                    logging.exception("delete_skill：更新父级 children_kwd 失败 kb=%s 父级=%s", dataset_id, parent_kwd)
 
     # ------------------------------------------------------------------
-    # 5. Prune and rewrite skill_all tree
+    # 5.修剪并重写skill_all树
     # ------------------------------------------------------------------
     try:
         deleted_set = set(all_kwds)
@@ -3172,14 +3139,14 @@ async def delete_skill(dataset_id: str, tenant_id: str, skill_kwd: str):
         skill_all_row["skill_with_weight"] = json.dumps(pruned_tree, ensure_ascii=False, indent=2)
         settings.docStoreConn.insert([skill_all_row], index_nm, dataset_id)
     except Exception:
-        logging.exception("delete_skill: rewrite skill_all failed kb=%s skill=%s", dataset_id, skill_kwd)
+        logging.exception("delete_skill：重写skill_all失败kb=%s技能=%s", dataset_id, skill_kwd)
         return False, "Failed to update skill tree."
 
     return True, {"deleted": int(deleted or 0)}
 
 
 async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
-    """Fetch the full markdown body for a single skill node."""
+    """获取单个技能节点的完整 Markdown 正文。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -3220,7 +3187,7 @@ async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
         field_map = settings.docStoreConn.get_fields(res, select_fields)
     except Exception:
         logging.exception(
-            "get_skill_page: docStore search failed for kb=%s skill=%s",
+            "get_skill_page：kb=%s技能=%s的docStore搜索失败",
             dataset_id,
             skill_kwd,
         )
@@ -3244,11 +3211,11 @@ async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
 
 
 # ---------------------------------------------------------------------------
-# Dataset navigation tree (written by rag/advanced_rag/knowlege_compile/
-# dataset_nav.py as nav_cluster / nav_doc rows). Loaded hierarchically: the
-# first call returns the top clusters (parent = "root"); clicking a cluster
-# returns its direct children (sub-clusters + document leaves). These rows are
-# ``available_int=0`` so they're read via docStoreConn.search directly.
+# 数据集导航树（作者：rag/advanced_rag/knowlege_compile/
+# dataset_nav.py 为 nav_cluster / nav_doc 行）。分层加载：
+# 第一次调用返回顶部簇（父簇 = "root"）；单击集群
+# 返回其直接子节点（子集群 + 文档叶）。这些行是
+# ``available_int=0`` 因此可以直接通过 docStoreConn.search 读取它们。
 # ---------------------------------------------------------------------------
 
 _NAV_COMPILE_KWD = "dataset_nav"
@@ -3267,14 +3234,14 @@ _NAV_FIELDS = [
 
 
 def _first_str(val) -> str:
-    """Extract the first string from a value that may be str, list, tuple, or set."""
+    """从可能是 str、list、tuple 或 set 的值中提取第一个字符串。"""
     if isinstance(val, (list, tuple, set)):
         return str(next(iter(val), "") or "")
     return str(val or "")
 
 
 def _resolve_embd_mdl(kb):
-    """Resolve the embedding model for a knowledge base, or None on failure."""
+    """解析知识库的嵌入模型，如果失败则为“无”。"""
     from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type
     from api.db.services.llm_service import LLMBundle
     from common.constants import LLMType
@@ -3288,12 +3255,12 @@ def _resolve_embd_mdl(kb):
             return None
         return LLMBundle(kb.tenant_id, embd_model_config)
     except Exception:
-        logging.exception("Failed to resolve embedding model for kb=%s", kb.id)
+        logging.exception("无法解析 kb=%s 的嵌入模型", kb.id)
         return None
 
 
 def _nav_item(row: dict) -> dict:
-    """Shape one nav row into a UI node: name, description, doc count, type."""
+    """将一个导航行塑造成一个 UI 节点：名称、描述、文档计数、类型。"""
     try:
         payload = json.loads(row.get("content_with_weight") or "{}")
     except Exception:
@@ -3308,7 +3275,7 @@ def _nav_item(row: dict) -> dict:
         "keywords": list(payload.get("keywords") or []),
         "entities": list(payload.get("entities") or []),
         "graph_content": payload.get("graph_content") or "",
-        # doc_id count under this node: the cluster`s tally, or 1 for a leaf.
+        # doc_id 该节点下的计数：集群计数，或者叶子为 1。
         "doc_count": int(row.get("doc_count_int") or 0) if is_cluster else 1,
         "type": "cluster" if is_cluster else "doc",
         "doc_id": None if is_cluster else (row.get("doc_id") or row.get("name")),
@@ -3317,7 +3284,7 @@ def _nav_item(row: dict) -> dict:
 
 
 async def _nav_search(dataset_id: str, tenant_id: str, condition: dict, page: int, page_size: int):
-    """Run one nav-tree search and shape the hits into UI nodes."""
+    """运行一个导航树搜索并将命中结果整形为 UI 节点。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -3335,7 +3302,7 @@ async def _nav_search(dataset_id: str, tenant_id: str, condition: dict, page: in
 
     order_by = OrderByExpr()
     try:
-        # Biggest clusters first; leaves (no doc_count_int) fall to the end.
+        # 最大的簇优先；叶子（无doc_count_int）落到最后。
         order_by.desc("doc_count_int")
     except Exception:
         order_by = OrderByExpr()
@@ -3354,7 +3321,7 @@ async def _nav_search(dataset_id: str, tenant_id: str, condition: dict, page: in
         )
         field_map = settings.docStoreConn.get_fields(res, _NAV_FIELDS)
     except Exception:
-        logging.exception("dataset_nav: docStore search failed for kb=%s", dataset_id)
+        logging.exception("dataset_nav：kb = %s 的 docStore 搜索失败", dataset_id)
         return True, {"total": 0, "items": []}
 
     total = settings.docStoreConn.get_total(res)
@@ -3363,12 +3330,11 @@ async def _nav_search(dataset_id: str, tenant_id: str, condition: dict, page: in
 
 
 async def list_nav_clusters(dataset_id: str, tenant_id: str, page: int = 1, page_size: int = 1000, q: str | None = None, top_k: int | None = None):
-    """First level of the nav tree: the clusters with no parent.
+    """导航树的第一级：没有父级的集群。
 
-    When ``q`` is provided, runs a tree-structured search (mode="navigation_tree")
-    and returns enriched nav node items in the same ``_nav_item`` shape so the
-    frontend tree search can reuse this endpoint.
-    """
+    当``q`` is provided, runs a tree-structured search (mode="navigation_tree")
+    and returns enriched nav node items in the same ``_nav_item``形状时，
+    前端树搜索可以重用此端点。"""
     if q and q.strip():
         success, result = await search_dataset_layers(dataset_id, tenant_id, q.strip(), "navigation_tree", top_k=top_k or 1000)
         if not success:
@@ -3384,11 +3350,10 @@ async def list_nav_clusters(dataset_id: str, tenant_id: str, page: int = 1, page
 
 
 async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: int = 1, page_size: int = 1000):
-    """Direct children of the node ``name`` — sub-clusters and document leaves.
+    """节点“`name`”的直接子节点 — 子集群和文档叶。
 
-    One level at a time (lazy) so the tree loads hierarchically as the user
-    expands each node.
-    """
+    一次一层（惰性），因此树按照用户分层加载
+    展开每个节点。"""
     if not isinstance(name, str) or not name.strip():
         return True, {"total": 0, "items": []}
     condition = {
@@ -3399,11 +3364,10 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
 
 
 async def delete_nav(dataset_id: str, tenant_id: str):
-    """Delete the entire dataset navigation tree for a dataset.
+    """删除数据集的整个数据集导航树。
 
-    Returns ``(True, {"deleted": <n>})``; succeeds with ``0`` when there is no
-    index yet.
-    """
+    当没有时返回``(True, {"deleted": <n>})``; succeeds with ``0``
+    索引还没有。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -3421,19 +3385,18 @@ async def delete_nav(dataset_id: str, tenant_id: str):
             dataset_id,
         )
     except Exception:
-        logging.exception("delete_nav: docStore delete failed for kb=%s", dataset_id)
+        logging.exception("delete_nav：kb = %s 的 docStore 删除失败", dataset_id)
         return False, "Failed to delete the navigation tree."
 
     return True, {"deleted": int(deleted or 0)}
 
 
 async def delete_nav_node(dataset_id: str, tenant_id: str, name: str):
-    """Delete one navigation node (identified by ``name``) and its whole subtree.
+    """删除一个导航节点（由``name``) and its whole subtree.
 
-    Children reference their parent by ``name`` (``parent_kwd``), so removing a
-    cluster without its descendants would leave them orphaned in the tree view.
-    We therefore walk the subtree top-down and delete every node in it.
-    """
+    Children reference their parent by ``name`` (``parent_kwd``标识），因此删除一个导航节点
+    没有其后代的集群将使它们在树视图中成为孤儿。
+    因此，我们自上而下遍历子树并删除其中的每个节点。"""
     if not isinstance(name, str) or not name.strip():
         return True, {"deleted": 0}
     name = name.strip()
@@ -3479,23 +3442,23 @@ async def delete_nav_node(dataset_id: str, tenant_id: str, name: str):
     try:
         await lock.spin_acquire()
     except Exception:
-        logging.exception("delete_nav_node: lock acquire failed for kb=%s", dataset_id)
+        logging.exception("delete_nav_node：kb = %s 的锁获取失败", dataset_id)
         return False, "Failed to acquire the navigation tree lock."
 
     try:
-        # ES requires the keyword subfield for exact node-name matching. Infinity
-        # has a scalar varchar name field, while parent_kwd is exact-matchable.
+        # ES 需要关键字子字段以实现精确的节点名称匹配。 Infinity
+        # 具有标量 varchar 名称字段，而 parent_kwd 是精确匹配的。
         name_field = "name.keyword" if settings.DOC_ENGINE.lower() in {"elasticsearch", "opensearch"} else "name"
         target_condition = {"compile_kwd": [_NAV_COMPILE_KWD], name_field: [name]}
         rows = await search_rows(target_condition)
         if not rows and name_field != "name":
-            # Keep this fallback for installations with an older/missing mapping.
+            # 使用 older/missing 映射保留此后备安装。
             rows = [row for row in await search_rows({"compile_kwd": [_NAV_COMPILE_KWD]}) if row.get("name") == name]
         if not rows:
             return True, {"deleted": 0}
 
-        # Collect the target and descendants by stable row IDs, not by names.
-        # Names are display values and may collide across malformed/old data.
+        # 按稳定行 IDs 收集目标和后代，而不是按名称。
+        # 名称是显示值，可能会与 malformed/old 数据发生冲突。
         rows_by_id = {row.get("id"): row for row in rows if row.get("id")}
         frontier = [row.get("name") for row in rows if row.get("name")]
         for _ in range(64):
@@ -3514,8 +3477,8 @@ async def delete_nav_node(dataset_id: str, tenant_id: str, name: str):
                         frontier.append(child_name)
 
         deleted = 0
-        # Reuse the existing document-removal path so direct parents are
-        # updated and empty ancestor clusters are cleaned consistently.
+        # 重用现有的文档删除路径，以便直接父级
+        # 更新和空祖先集群一致清理。
         for row in rows_by_id.values():
             if row.get("type_kwd") == "nav_doc" and row.get("doc_id"):
                 await _remove_dataset_nav_doc_locked(tenant_id, dataset_id, row["doc_id"])
@@ -3533,13 +3496,13 @@ async def delete_nav_node(dataset_id: str, tenant_id: str, name: str):
 
         return True, {"deleted": deleted}
     except Exception:
-        logging.exception("delete_nav_node: deletion failed for kb=%s name=%s", dataset_id, name)
+        logging.exception("delete_nav_node： kb=%s 删除失败 名称=%s", dataset_id, name)
         return False, "Failed to delete the navigation node."
     finally:
         try:
             lock.release()
         except Exception:
-            logging.exception("delete_nav_node: lock release failed for kb=%s", dataset_id)
+            logging.exception("delete_nav_node：kb = %s 的锁定释放失败", dataset_id)
 
 
 async def generate_nav(
@@ -3547,18 +3510,17 @@ async def generate_nav(
     tenant_id: str,
     documents: list[dict] | None = None,
 ):
-    """Create the entire navigation tree.
+    """创建整个导航树。
 
-    Deletes any existing navigation tree first, then rebuilds it from
-    scratch. When ``documents`` is provided, only those doc→summary pairs
+    首先删除任何现有的导航树，然后重建它
+    刮擦。当“`documents`` is provided, only those doc→summary pairs
     are used; otherwise all documents in the dataset are auto-discovered
     and inserted into the tree.
 
     ``documents`` is a list of ``{"doc_id": str, "summary": str,
     "doc_title": str (optional), "source_type": str (optional)}``.
 
-    Returns ``(True, {"deleted": <n>, "upserted": <n>})`` on success.
-    """
+    Returns ``(True, {"deleted": <n>, "upserted": <n>})`”开启时成功。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
 
@@ -3566,7 +3528,7 @@ async def generate_nav(
     if kb is None:
         return False, "Dataset not found."
 
-    # Resolve models.
+    # 解析模型。
     from api.db.joint_services.tenant_model_service import (
         get_tenant_default_model_by_type,
     )
@@ -3582,13 +3544,14 @@ async def generate_nav(
     chat_model_config = get_tenant_default_model_by_type(kb.tenant_id, LLMType.CHAT)
     chat_mdl = LLMBundle(kb.tenant_id, chat_model_config)
 
-    # Step 0: auto-discover documents when not explicitly provided.
+    # 步骤0：未明确提供时自动发现文档。
     if not documents:
         try:
-            # Query all documents in the dataset directly without
-            # File / File2Document JOINs so that every document
-            # participates in the navigation tree (including docs
-            # created via API that have no file record).
+            # 直接查询数据集中所有文档，无需
+            # File / File2Document JOINs 这样每个文件
+            # 参与导航树（包括文档
+            # 通过 API 创建的
+            # 没有文件记录）。
             from api.db.db_utils import DB
             from api.db.services.doc_metadata_service import DocMetadataService
 
@@ -3616,11 +3579,11 @@ async def generate_nav(
                     }
                 )
 
-            # Prefer RAPTOR-generated summaries stored in the knowledge
-            # graph (compile_kwd="tree", knowledge_graph_kwd="graph")
-            # so that rebuilt nav descriptions match the original
-            # tree-compilation output.  Fall back to meta_fields.title
-            # or filename when the graph is absent.
+            # 更喜欢 RAPTOR 生成的摘要存储在知识中
+            # 图（compile_kwd="tree"，knowledge_graph_kwd="graph"）
+            # 以便重建的导航描述与原始内容相匹配
+            # 树编译输出。  回退到 meta_fields.title
+            # 或图表不存在时的文件名。
             raptor_summaries: dict[str, str] = {}
             pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
             if pack is not None:
@@ -3648,14 +3611,14 @@ async def generate_nav(
                             graph = json.loads(row.get("content_with_weight") or "{}")
                         except Exception:
                             continue
-                        # Build both:
-                        #   - root_summary: first line of root desc (short,
-                        #     for the display title / description field)
-                        #   - graph_text: structured text from ALL entities
-                        #     and relations (for embedding, keyword extraction,
-                        #     entity extraction, and stored as graph_content).
-                        # Shared with the parse-time path (run_tree_templates)
-                        # so both produce identical, complete nav_doc content.
+                        # 构建两者：
+                        # - root_summary：根描述的第一行（短，
+                        # 为显示标题/描述字段）
+                        # - graph_text：来自 ALL 实体的结构化文本
+                        # 和关系（用于嵌入、关键字提取、
+                        # 实体提取，并存储为graph_content）。
+                        # 与解析时路径共享 (run_tree_templates)
+                        # 因此两者产生相同、完整的 nav_doc 内容。
                         root_summary, graph_text = build_nav_graph_text(graph)
 
                         if root_summary:
@@ -3664,7 +3627,7 @@ async def generate_nav(
                                 "graph_text": graph_text or root_summary,
                             }
                 except Exception:
-                    logging.exception("generate_nav: failed to read RAPTOR graph summaries for kb=%s", dataset_id)
+                    logging.exception("generate_nav：无法读取 kb=%s 的 RAPTOR 图形摘要", dataset_id)
 
             documents = []
             for d in all_docs:
@@ -3684,15 +3647,15 @@ async def generate_nav(
                 )
 
         except Exception:
-            logging.exception("generate_nav: failed to auto-discover docs for kb=%s", dataset_id)
+            logging.exception("generate_nav：无法自动发现 kb=%s 的文档", dataset_id)
             return False, "Failed to auto-discover documents."
 
     if not documents:
         return False, "No documents found in dataset."
 
-    # Step 1: delete the entire existing navigation tree so we start clean.
-    # ``deleted`` reports the number of *clusters* removed (not nav_doc leaves),
-    # since that is the meaningful unit for the navigation tree.
+    # 第 1 步：删除整个现有导航树，以便我们开始清理。
+    # ``deleted`` 报告删除的*簇*数量（不是 nav_doc 叶子），
+    # 因为这是导航树的有意义的单位。
     deleted = 0
     pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
     if pack is not None:
@@ -3700,7 +3663,7 @@ async def generate_nav(
         try:
             from common.doc_store.doc_store_base import OrderByExpr
 
-            # Count existing clusters before wiping the tree.
+            # 在擦除树之前对现有簇进行计数。
             count_res = await thread_pool_exec(
                 settings.docStoreConn.search,
                 ["id"],
@@ -3722,15 +3685,15 @@ async def generate_nav(
                 dataset_id,
             )
         except Exception:
-            logging.exception("generate_nav: failed to clear existing nav for kb=%s", dataset_id)
+            logging.exception("generate_nav：无法清除 kb=%s 的现有导航", dataset_id)
             return False, "Failed to clear existing navigation tree."
 
-    # Step 2: rebuild the tree from the provided doc→summary pairs.
+    # 步骤 2：根据提供的文档→摘要对重建树。
     upserted = 0
     for doc in documents or []:
         doc_id = (doc.get("doc_id") or "").strip()
         summary = doc.get("summary")
-        # summary can be a plain string or a RAPTOR tree dict.
+        # 摘要可以是纯字符串或 RAPTOR 树字典。
         if isinstance(summary, str):
             summary = summary.strip()
         if not doc_id or not summary:
@@ -3746,14 +3709,14 @@ async def generate_nav(
             )
             upserted += 1
         except Exception:
-            logging.exception("generate_nav: failed for doc=%s kb=%s", doc_id, dataset_id)
+            logging.exception("generate_nav： doc=%s kb=%s 失败", doc_id, dataset_id)
             return True, {"deleted": deleted, "upserted": upserted, "failed_doc_id": doc_id}
 
     return True, {"deleted": deleted, "upserted": upserted}
 
 
 # ---------------------------------------------------------------------------
-# Unified Explore Search
+# 统一探索 Search
 # ---------------------------------------------------------------------------
 
 _LAYERS_HANDLERS: dict[str, str] = {
@@ -3774,10 +3737,10 @@ async def search_dataset_layers(
     top_k: int | None = None,
     doc_scope: list[str] | None = None,
 ) -> tuple[bool, dict]:
-    """Unified search across different knowledge layers of a dataset.
+    """跨数据集不同知识层的统一搜索。
 
-    Args:
-        mode: One of ``"chunk"``, ``"nav_doc"``, ``"nav_cluster"``, ``"navigation_tree"``, ``"all"``.
+    参数：
+        模式：其中之一``"chunk"``, ``"nav_doc"``, `ZXQK EEP00410004ZXQ`, ``"navigation_tree"``, `ZXQKEEP00 410008ZXQ`.
             - chunk: raw document chunks (via the main retrieval pipeline)
             - nav_doc: navigation tree document leaves
             - nav_cluster: navigation tree cluster nodes
@@ -3786,11 +3749,10 @@ async def search_dataset_layers(
         doc_scope: Optional set of documents to restrict the search to.  None or
             empty means all documents of the dataset.  Forwarded to every mode:
             nav modes filter the compiled nav rows by doc, ``chunk`` restricts
-            the retriever via ``doc_ids``.  Applied query-time so scoped rows
+            the retriever via `ZXQKEEP0041001 2ZXQ`.  Applied query-time so scoped rows
             are never dropped by the ``top_k`` truncation.
 
-        Items are shaped as ``{"doc_id": str, "score": float}``.
-    """
+        Items are shaped as ``{"doc_id": str, "score": float}``。"""
     from rag.advanced_rag.knowlege_compile.dataset_nav import search_dataset_nav
 
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
@@ -3810,16 +3772,16 @@ async def search_dataset_layers(
         embd_mdl = LLMBundle(kb.tenant_id, embd_model_config)
     except Exception as e:
         logging.warning(
-            "search_dataset_layers: failed to create LLMBundle(EMBEDDING) for tenant=%s: %s: %s",
+            "search_dataset_layers：无法为租户=%s创建LLMBundle（EMBEDDING）：%s： %s",
             kb.tenant_id,
             type(e).__name__,
             e,
         )
-        logging.exception("Full traceback for LLMBundle(EMBEDDING) failure")
+        logging.exception("LLMBundle(EMBEDDING)故障的完整回溯")
         embd_mdl = None
 
     logging.debug(
-        "search_dataset_layers: dispatching scoped mode=%s for dataset=%s, scoped_docs=%d",
+        "search_dataset_layers：调度作用域模式=%s，数据集=%s，scoped_docs=%d",
         mode,
         dataset_id,
         len([d for d in (doc_scope or []) if str(d).strip()]),
@@ -3898,8 +3860,8 @@ async def _nav_search_result(tenant_id, dataset_id, query, top_k, embd_mdl, sear
         if isinstance(raw_doc_id, str) and raw_doc_id.strip():
             doc_id = raw_doc_id.strip()
         else:
-            # Cluster row: pick the first doc_id that's in scope (if a scope
-            # is set) so we never leak an out-of-scope doc_id into the results.
+            # Cluster 行：选择范围内的第一个 doc_id（如果范围
+            # 已设置），因此我们绝不会将超出范围的 doc_id 泄漏到结果中。
             doc_ids = r.get("doc_ids") or []
             if scope_set:
                 doc_id = next((str(d).strip() for d in doc_ids if str(d).strip() in scope_set), "")
@@ -3911,8 +3873,8 @@ async def _nav_search_result(tenant_id, dataset_id, query, top_k, embd_mdl, sear
             "doc_id": doc_id,
             "score": round(float(r.get("score", 0.0)), 4),
         }
-        # Preserve the full nav node info so callers can enrich without a
-        # second ES round-trip.  Clusters have doc_id="" but carry name.
+        # 保留完整的导航节点信息，以便调用者无需
+        # 第二次 ES 往返。  簇具有 doc_id="" 但带有名称。
         if r.get("name") or r.get("description"):
             item["_nav"] = r
         items.append(item)
@@ -3965,7 +3927,7 @@ async def _search_layers_chunks(tenant_id, dataset_id, query, top_k, embd_mdl, k
 
 
 async def _search_layers_all(tenant_id, dataset_id, query, top_k, embd_mdl, kb, search_fn, *, doc_scope=None):
-    """Run all modes and return the union of doc_ids, with best score per doc."""
+    """运行所有模式并返回 doc_ids 的并集，每个文档的得分最高。"""
     import asyncio as _asyncio
 
     result_lists = await _asyncio.gather(
@@ -3986,7 +3948,7 @@ async def _search_layers_all(tenant_id, dataset_id, query, top_k, embd_mdl, kb, 
         for item in data.get("items", []):
             doc_id = item.get("doc_id", "")
             score = float(item.get("score", 0.0))
-            # Clusters have no doc_id; key by name so they survive dedup.
+            # 集群无doc_id；按名称键，这样它们就可以在重复数据删除后幸存下来。
             key = doc_id or item.get("_nav", {}).get("name", "")
             if key and score > doc_scores.get(key, {}).get("score", -1.0):
                 doc_scores[key] = item
@@ -4003,16 +3965,15 @@ async def _search_layers_all(tenant_id, dataset_id, query, top_k, embd_mdl, kb, 
 
 
 async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) -> list[dict]:
-    """Enrich ``{doc_id, score}`` items with full nav node info.
+    """丰富``{doc_id, score}`` items with full nav node info.
 
     Items that already carry a ``_nav`` payload (from nav_doc/nav_cluster/
     navigation_tree search) are shaped in-process.  Items without it (e.g.
-    chunk hits) are batch-fetched from ES by ``doc_id``.
+    chunk hits) are batch-fetched from ES by ``doc_id``。
 
-    For every matched doc, its parent cluster is also resolved and prepended
-    to the result set (cluster score = max child score) so the frontend can
-    highlight both the doc and its containing cluster in the tree.
-    """
+    对于每个匹配的文档，其父集群也会被解析并添加到前面
+    到结果集（集群分数 = 最大子分数），以便前端可以
+    在树中突出显示该文档及其包含的簇。"""
     from common.doc_store.doc_store_base import OrderByExpr
 
     if not items:
@@ -4024,7 +3985,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
         return items
     index_nm, _ = pack
 
-    # Phase 1: shape items that already have _nav; collect doc_ids for chunk-only hits.
+    # 第 1 阶段：塑造已有 _nav 的项目；收集 doc_ids 以获得仅块命中。
     doc_items: list[dict] = []
     missing_doc_ids: list[str] = []
     for it in items:
@@ -4043,7 +4004,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
                 "has_children": is_cluster,
                 "score": it.get("score", 0.0),
             }
-            # Capture parent_kwd for docs so we can fetch the parent cluster.
+            # 捕获 parent_kwd 的文档，以便我们可以获取父集群。
             if not is_cluster:
                 pn = nav.get("parent_kwd") or []
                 if isinstance(pn, (list, tuple, set)):
@@ -4057,7 +4018,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
                 missing_doc_ids.append(doc_id)
             doc_items.append(it)
 
-    # Phase 2: batch-fetch nav_doc rows for chunk-only hits (need parent_kwd).
+    # 第 2 阶段：批量获取 nav_doc 行以进行仅块命中（需要 parent_kwd）。
     all_doc_ids = missing_doc_ids + [d["doc_id"] for d in doc_items if d.get("type") == "doc" and d.get("doc_id") and not d.get("_parent_kwd")]
     nav_rows_by_doc_id: dict[str, dict] = {}
     if all_doc_ids:
@@ -4075,7 +4036,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
             )
             field_map = settings.docStoreConn.get_fields(res, _NAV_FIELDS)
         except Exception:
-            logging.exception("_enrich_nav_items: docStore search failed for kb=%s", dataset_id)
+            logging.exception("_enrich_nav_items：kb = %s 的 docStore 搜索失败", dataset_id)
             field_map = None
 
         for row in (field_map or {}).values():
@@ -4085,7 +4046,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
             if did:
                 nav_rows_by_doc_id[str(did)] = row
 
-    # Enrich chunk-only items with nav info + parent_kwd.
+    # 使用导航信息 + parent_kwd 丰富仅块项目。
     for i, it in enumerate(doc_items):
         if it.get("type"):
             continue
@@ -4097,7 +4058,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
             nav_item["_parent_kwd"] = _first_str(row.get("parent_kwd"))
             doc_items[i] = nav_item
 
-    # Phase 3: get parent_kwd for _nav doc items (search_dataset_nav strips it).
+    # 第 3 阶段：获取 _nav 文档项的 parent_kwd（search_dataset_nav 删除它）。
     nav_doc_names = [d["name"] for d in doc_items if d.get("type") == "doc" and not d.get("_parent_kwd") and d.get("name")]
     if nav_doc_names:
         name_field = "name.keyword" if settings.DOC_ENGINE.lower() in {"elasticsearch", "opensearch"} else "name"
@@ -4128,7 +4089,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
             if it.get("type") == "doc" and not it.get("_parent_kwd"):
                 it["_parent_kwd"] = parent_by_name.get(it.get("name", ""), "")
 
-    # Phase 4: batch-fetch parent cluster rows.
+    # 第 4 阶段：批量获取父簇行。
     parent_names = {it["_parent_kwd"] for it in doc_items if it.get("_parent_kwd")}
     cluster_by_name: dict[str, dict] = {}
     if parent_names:
@@ -4154,7 +4115,7 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
             if nm:
                 cluster_by_name[nm] = _nav_item(row)
 
-    # Phase 5: build result — clusters (max child score) then docs.
+    # 第 5 阶段：构建结果 - 集群（最大子分数）然后文档。
     cluster_scores: dict[str, float] = {}
     doc_parent: dict[int, str] = {}
     for i, it in enumerate(doc_items):
@@ -4166,10 +4127,10 @@ async def _enrich_nav_items(dataset_id: str, tenant_id: str, items: list[dict]) 
     clusters = [{**nav_item, "score": round(cluster_scores.get(name, 0.0), 4)} for name, nav_item in cluster_by_name.items()]
     cluster_names = {c["name"] for c in clusters}
 
-    # A matched doc whose parent cluster is also in the result is already
-    # represented by that cluster's tree — don't surface it as a second,
-    # separate root.  This keeps a search that hits both a cluster and its
-    # child doc down to a single nav_cluster tree instead of two roots.
+    # 父簇也在结果中的匹配文档已经存在
+    # 由该簇 's tree — don't 表示，将其表面作为第二个，
+    # 独立根。  这使得搜索能够同时命中集群及其
+    # 子文档下降到单个 nav_cluster 树而不是两个根。
     standalone_docs = [it for i, it in enumerate(doc_items) if it.get("type") != "cluster" and doc_parent.get(i) not in cluster_names]
     return clusters + standalone_docs
 
@@ -4185,17 +4146,17 @@ async def update_wiki_page(
     title: str | None = None,
     comments: str | None = None,
 ):
-    """Edit an artifact page in place from the canvas double-click dialog.
+    """从画布双击对话框中就地编辑工件页面。
 
-    Body must contain ``content_md`` — the (possibly edited) page markdown.
+    身体必须包含``content_md`` — the (possibly edited) page markdown.
     We run it through ``_wiki_transform_links`` so any newly typed
     ``[[slug]]`` references upgrade to clickable artifact URLs (and pre-rendered
     links pass through unchanged — the transform is idempotent on already-
-    rendered markdown). ``summary`` is re-derived from the new rendered text.
+    rendered markdown). `ZXQK EEP00010006ZXQ` is re-derived from the new rendered text.
     ``outlinks_kwd`` is rebuilt from the link-transform pass.
 
     Per the v1 contract, only the page row is updated. The canvas
-    ``wiki_page_graph`` / ``wiki_entity`` / ``wiki_relation``
+    ``wiki_page_graph`` / `ZXQKEEP00 010012ZXQ` / ``wiki_relation``
     rows stay stale until the next full artifact compile.
 
     Side effect: when the rendered post-save markdown differs from the
@@ -4203,10 +4164,9 @@ async def update_wiki_page(
     (git-style audit). No-op saves are silently skipped — empty diff,
     no row.
 
-    Returns ``(True, page_dict)`` mirroring ``get_wiki_page``, or
+    Returns `ZXQKEEP0001001 8ZXQ` mirroring ``get_wiki_page``, or
     ``(True, None)`` when the row is missing, or
-    ``(False, message)`` on authorization failure.
-    """
+    ``(False, message)``授权失败时。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -4224,15 +4184,15 @@ async def update_wiki_page(
 
     full_slug = f"{page_type}/{slug}" if "/" not in slug else slug
 
-    # Capture the pre-edit rendered content + the row id. Both come from
-    # the same search: the row id is the dict key returned by
-    # docStoreConn.get_fields. We need the id specifically because the
-    # generic non-id update path (ESConnection.update slow branch) routes
-    # through a Painless script that scrubs newlines / single quotes /
-    # backslash escapes from string values — which would collapse every
-    # paragraph in the saved markdown to one line. Passing the row id in
-    # ``condition`` selects the fast partial-update branch which preserves
-    # the JSON value verbatim.
+    # 捕获预编辑渲染内容+行id。两者都来自
+    # 相同的搜索：行id是返回的dict key
+    # docStoreConn.get_fields。我们特别需要 id 因为
+    # 通用非id更新路径（ESConnection.update慢分支）路由
+    # 通过无痛脚本擦除换行符/单引号/
+    # 反斜杠从字符串值中转义 — 这会崩溃每个
+    # 段落中保存的markdown 为一行。将行 id 传入
+    # ``condition`` 选择保留的快速部分更新分支
+    # JSON 逐字值。
     from common.doc_store.doc_store_base import OrderByExpr
 
     row_id: str | None = None
@@ -4262,7 +4222,7 @@ async def update_wiki_page(
             content_before = row.get("md_with_weight") or row.get("content_with_weight") or ""
     except Exception:
         logging.exception(
-            "update_wiki_page: lookup failed for kb=%s slug=%s",
+            "update_wiki_page：kb = %s slug = %s 查找失败",
             dataset_id,
             full_slug,
         )
@@ -4274,9 +4234,9 @@ async def update_wiki_page(
     summary = _wiki_extract_summary(rendered) or ""
 
     try:
-        # id-keyed condition forces the partial-update fast path — no
-        # newline scrubbing. See the comment above the lookup for the
-        # full reasoning.
+        # id 键控条件强制部分更新快速路径 — 否
+        # 换行擦洗。请参阅查找上方的评论
+        # 完整推理。
         ok = settings.docStoreConn.update(
             {"id": row_id},
             {
@@ -4290,7 +4250,7 @@ async def update_wiki_page(
         )
     except Exception:
         logging.exception(
-            "update_wiki_page: docStore update failed for kb=%s slug=%s",
+            "update_wiki_page：kb=%s slug=%s 的 docStore 更新失败",
             dataset_id,
             full_slug,
         )
@@ -4305,13 +4265,13 @@ async def update_wiki_page(
             await thread_pool_exec(refresh_idx, index_nm)
         except Exception:
             logging.exception(
-                "update_wiki_page: index refresh failed for kb=%s slug=%s",
+                "update_wiki_page：kb = %s slug = %s 的索引刷新失败",
                 dataset_id,
                 full_slug,
             )
 
-    # Record a file_commit row on every real change. ``record_page_edit``
-    # returns None for empty-diff saves, which we silently swallow.
+    # 在每次实际更改时记录 file_commit 行。 ``record_page_edit``
+    # 对于空差异保存返回 None，我们默默地接受。
     try:
         FileCommitService.record_page_edit(
             tenant_id=tenant_id,
@@ -4326,28 +4286,28 @@ async def update_wiki_page(
         )
     except Exception:
         logging.exception(
-            "update_wiki_page: file_commit record failed for kb=%s slug=%s",
+            "update_wiki_page: file_commit 记录失败，kb=%s slug=%s",
             dataset_id,
             full_slug,
         )
 
-    # Re-read the row so the dialog gets the canonical post-update state.
+    # 重新读取该行，以便对话框获得规范的更新后状态。
     return await get_wiki_page(dataset_id, tenant_id, page_type, slug)
 
 
-# ``list_wiki_commits`` / ``get_wiki_commit`` retired — the two
-# ``/datasets/<id>/artifacts/.../commits`` REST endpoints now go through
-# the generic file-commit routes (``/datasets/<id>/commits`` with an
-# optional ``?slug=`` filter), backed by
-# :meth:`FileCommitService.list_page_commits` and
-# :meth:`FileCommitService.get_page_commit_detail`.
+# ``list_wiki_commits`` / ``get_wiki_commit`` 退役 — 两个
+# ``/datasets/<id>/artifacts/.../commits`` REST 端点现在通过
+# 通用文件提交路由（“`/datasets/<id>/commits`”，带有
+# 可选“`?slug=`”过滤器），支持
+# ：方法：`FileCommitService.list_page_commits` 和
+# ：甲基：`FileCommitService.get_page_commit_detail`。
 
 
-# All row types the artifact pipeline writes. Listed in dependency
-# order so partial failures of earlier deletes don't leave behind state
-# that downstream phases would silently reuse. ``wiki_page_graph``
-# is the materialized canvas graph derived from the refined pages —
-# the dataset Artifact tab's graph view reads exactly this row.
+# 工件管道写入的所有行类型。依附列出
+# 顺序，以便早期删除的部分失败不会留下状态
+# 下游阶段将默默地重用。 ``wiki_page_graph``
+# 是从精炼页面衍生出来的物化画布图——
+# 数据集 Artifact 选项卡的图形视图准确读取这一行。
 _WIKI_COMPILE_KWDS = (
     "wiki_map_extract",
     "wiki_map_state",
@@ -4366,7 +4326,7 @@ _WIKI_COMPILE_KWDS = (
     "wiki_page_graph",
 )
 
-# Tunables for the incremental graph loader. See ``get_wiki_graph``.
+# 增量图形加载器的可调参数。参见“`get_wiki_graph`”。
 _WIKI_GRAPH_ENTITY_KWD = "wiki_entity"
 _WIKI_GRAPH_RELATION_KWD = "wiki_relation"
 _WIKI_GRAPH_ENTITY_PAGE_SIZE = 32
@@ -4374,14 +4334,13 @@ _WIKI_GRAPH_MAX_LOADING_ENTITY = 512
 
 
 def _wiki_entity_payload(row: dict) -> dict | None:
-    """Project one ``wiki_entity`` ES row onto the canvas entity shape.
+    """项目一``wiki_entity`` ES row onto the canvas entity shape.
 
     The row stores the canvas payload pre-built as JSON in
-    ``content_with_weight``; we parse it back and overlay the columns
-    the writer set independently (weight_int, source_chunk_ids) so the
-    frontend gets the authoritative numbers regardless of any
-    JSON-vs-column drift.
-    """
+    ``content_with_weight``；我们解析它并覆盖列
+    作者独立设置（weight_int，source_chunk_ids）所以
+    无论任何情况，前端都会获取权威数字
+    JSON-vs-柱漂移。"""
     raw = row.get("content_with_weight") or ""
     payload: dict = {}
     if isinstance(raw, str) and raw.strip():
@@ -4432,13 +4391,12 @@ async def _wiki_search_entity_page(
     limit: int,
     keywords: str = "",
 ):
-    """One page of wiki_entity rows.
+    """wiki_entity 行的一页。
 
-    Without ``keywords``: ordered by ``weight_int DESC`` (heaviest nodes first).
-    With ``keywords``: BM25 full-text match over ``content_ltks`` (slug +
-    summary), ordered by relevance. ``wiki_entity`` rows are BM25-only (no
-    embedding vector), so this is a lexical search, not a dense KNN.
-    """
+    没有``keywords``: ordered by ``weight_int DESC`` (heaviest nodes first).
+    With `ZXQKEEP00 340005ZXQ`: BM25 full-text match over ``content_ltks`` (slug +
+    summary), ordered by relevance. ``wiki_entity``行仅是 BM25（无
+    嵌入向量），所以这是一个词法搜索，而不是密集的 KNN。"""
     from common.doc_store.doc_store_base import OrderByExpr
 
     select_fields = [
@@ -4457,11 +4415,11 @@ async def _wiki_search_entity_page(
             match_text, _ = settings.retriever.qryr.question(keywords, min_match=0.1)
             match_expressions = [match_text]
         except Exception:
-            logging.exception("get_wiki_graph: failed to build keyword query for kb=%s", dataset_id)
+            logging.exception("get_wiki_graph：无法为 kb=%s 构建关键字查询", dataset_id)
             match_expressions = []
     if not match_expressions:
-        # No keywords (or query build failed) → heaviest-weighted first. When a
-        # text match is present the store ranks by BM25 score instead.
+        # 没有关键字（或查询构建失败）→ 最重的优先。当一个
+        # 文本匹配显示商店按 BM25 分数排名。
         try:
             order_by.desc("weight_int")
         except Exception:
@@ -4487,13 +4445,12 @@ async def _wiki_search_entities_by_slugs(
     dataset_id: str,
     slugs: list[str],
 ):
-    """Fetch entity rows whose ``slug_kwd`` is in ``slugs``. Unordered.
+    """获取实体行``slug_kwd`` is in ``slugs``. Unordered.
 
-    Like :func:`_wiki_search_relations_from`, we avoid pushing ``slug_kwd`` (a
-    *_kwd analysed field) into the search filter — a `slug_kwd: [..]` with ~20
-    entries triggers TOO_MANY_CONNECTIONS. Pull all entity rows once and filter
-    in memory.
-    """
+    Like :func:`_wiki_search_关系_来自`, we avoid pushing ``slug_kwd`` (a
+    *_kwd analysed field) into the search filter — a `slug_kwd： [..]` 约 20
+    条目触发 TOO_MANY_CONNECTIONS。拉取所有实体行一次并过滤
+    记忆中。"""
     if not slugs:
         return {}
 
@@ -4542,17 +4499,16 @@ async def _wiki_search_relations_from(
     dataset_id: str,
     from_slugs: list[str],
 ):
-    """Fetch relation rows whose ``from_kwd`` is in ``from_slugs``.
+    """获取关系行，其``from_kwd`` is in ``from_slugs``.
 
-    IMPORTANT: we do NOT push ``from_slugs`` into the search filter. ``from_kwd``
+    IMPORTANT: we do NOT push `ZXQKEEP00 390004ZXQ` into the search filter. ``from_kwd``
     is a *_kwd (whitespace-# analysed) field, and the generic search path turns
-    `from_kwd: [v1, v2, ...]` into one ``filter_fulltext`` clause per value. A
-    batch of only ~20 slugs already blows past Infinity's per-query connection
-    budget and surfaces as TOO_MANY_CONNECTIONS (the incremental writer emits
-    many relations, so sub_slugs easily exceeds 20). Instead we pull ALL relation
-    rows for the dataset in ONE cheap query (relations are short and few) and
-    filter in memory.
-    """
+    `from_kwd：每个值的 [v1, v2, ...]` into one ``filter_fulltext`` 子句。一个
+    仅约 20 个 slugs 批次就已经超过了 Infinity 的每个查询连接
+    预算和表面为 TOO_MANY_CONNECTIONS（增量写入器发出
+    很多关系，所以sub_slugs很容易超过20）。相反，我们拉 ALL 关系
+    ONE 廉价查询中数据集的行（关系短且少）和
+    内存中的过滤器。"""
     if not from_slugs:
         return {}
 
@@ -4560,8 +4516,8 @@ async def _wiki_search_relations_from(
 
     select_fields = ["id", "from_kwd", "to_kwd", "content_with_weight"]
     wanted = set(from_slugs)
-    # Single query without the huge from_kwd IN-filter. Page over results in
-    # case a dataset has more than 10000 relations.
+    # 单个查询，无需巨大的 from_kwd IN 过滤器。翻页结果为
+    # 情况下数据集有超过 10000 个关系。
     results = {}
     offset, page_size = 0, 1000
     while True:
@@ -4599,34 +4555,26 @@ async def get_wiki_graph(
     keywords: str | None = None,
     top_n: int | None = None,
 ):
-    """Load the canvas graph payload incrementally from per-row data.
+    """从每行数据增量加载画布图有效负载。
 
     ``top_n`` overrides the entity budget (default ``_WIKI_GRAPH_MAX_LOADING_ENTITY``).
-    ``keywords`` (overview mode only; ignored when ``node`` is given) seeds the
+    ``keywords`Z XQKEEP00420005ZXQ`node`` is given) seeds the
     graph from the best BM25 matches on ``wiki_entity`` rows instead of the
     heaviest-weighted ones. Only entities referenced by a relation are returned.
 
     Two modes:
 
-    * **Overview** (``node`` is None) — paginate ``wiki_entity`` rows
-      ordered by ``weight_int DESC`` in pages of
-      ``_WIKI_GRAPH_ENTITY_PAGE_SIZE``. For each page, append entities
+    * **Overview** (`ZXQK EEP00420010ZXQ` is None) — paginate ``wiki_entity`` rows
+      ordered by ``weight_int DESC`ZXQKEE P00420015ZXQ`_WIKI_GRAPH_ENTITY_PAGE_SIZE``. For each page, append entities
       to a running set while the **cumulative** weight stays within
-      ``_WIKI_GRAPH_MAX_LOADING_ENTITY``. Pull ``wiki_relation``
+      ``_WIKI_GRAPH_MAX_LOADING_ENTITY``. Pull `ZXQKEEP00 420020ZXQ`
       rows whose ``from_kwd`` is in the just-added entities; pull the
-      ``to`` targets that we haven't seen yet (they count toward the same
-      cap). Stop once the cap is hit, or the page is empty, or no entry
-      from the page fit under the budget.
-
-    * **Click** (``node`` is a slug) — load the centre entity (always
-      included), pull every ``wiki_relation`` with ``from_kwd=node``,
+      ``to`ZXQKEEP0042 0025ZXQ`node`` is a slug) — load the centre entity (always
+      included), pull every ``wiki_relation`` with `ZXQKEEP0042003 0ZXQ`,
       then pull the ``to`` entities. Capped at
-      ``_WIKI_GRAPH_MAX_LOADING_ENTITY`` for hub-node safety.
-
-    Returns ``(True, {"entities": [...], "relations": [...]})`` shaped
+      ``_WIKI_GRAPH_MAX_LOADING_ENTITY`ZXQKEEP00420035Z XQ`(True, {"entities": [...], "relations": [...]})`` shaped
     exactly as the frontend ``ForceGraph`` adapter consumes, or
-    ``(False, message)`` on authorization failure.
-    """
+    ``(False, message)``授权失败时。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -4639,8 +4587,8 @@ async def get_wiki_graph(
     index_nm, _ = pack
 
     keywords = (keywords or "").strip()
-    # Entity budget: caller-overridable, clamped to a sane range so a bad param
-    # can neither disable the cap nor blow up the response.
+    # 实体预算：调用者可重写，限制在合理的范围内，因此是一个错误的参数
+    # 既不能禁用上限，也不能炸毁响应。
     if top_n is not None:
         try:
             cap = max(1, min(int(top_n), 1024))
@@ -4650,11 +4598,9 @@ async def get_wiki_graph(
         cap = _WIKI_GRAPH_MAX_LOADING_ENTITY
     page_size = _WIKI_GRAPH_ENTITY_PAGE_SIZE
 
-    # ``entities`` preserves first-seen order so the canvas paints the
-    # heaviest-weighted nodes first (or, in click mode, the centre node
-    # first). The dict-keyed-by-slug structure also deduplicates the
-    # "B is a to-target AND later a high-weight entity in its own right"
-    # case cheaply.
+    # ``entities`` 保留第一次出现的顺序，使画布优先绘制权重最高的节点；单击模式下则优先
+    # 绘制中心节点。以 slug 为键的字典还能低成本去重，例如同一节点既是某条关系的目标，
+    # 后续又以高权重实体的身份出现时，只保留一份实体记录。
     entities: dict[str, dict] = {}
     relations: list[dict] = []
     relation_keys: set[tuple[str, str]] = set()
@@ -4673,7 +4619,7 @@ async def get_wiki_graph(
         relation_keys.add(key)
         relations.append(payload)
 
-    # ---- Flow B — click expansion centred on ``node``. ----------------
+    # ---- 流程 B — 单击以“`node`”为中心的展开。 ----------------
     if isinstance(node, str) and node.strip():
         center_slug = node.strip()
         try:
@@ -4684,7 +4630,7 @@ async def get_wiki_graph(
             )
         except Exception:
             logging.exception(
-                "get_wiki_graph: centre lookup failed kb=%s node=%s",
+                "get_wiki_graph：中心查找失败 kb=%s 节点=%s",
                 dataset_id,
                 center_slug,
             )
@@ -4697,11 +4643,11 @@ async def get_wiki_graph(
                 break
 
         if center_slug not in entities:
-            # Caller pointed at a slug that doesn't exist; return empty
-            # rather than a confusing partial graph.
+            # 调用者指向一个不存在的slug；返回空
+            # 而不是令人困惑的部分图。
             return True, empty
 
-        # Outgoing edges from the centre, capped by MAX_LOADING_ENTITY.
+        # 从中心向外的边缘，由 MAX_LOADING_ENTITY 覆盖。
         try:
             rel_map = await _wiki_search_relations_from(
                 index_nm,
@@ -4710,7 +4656,7 @@ async def get_wiki_graph(
             )
         except Exception:
             logging.exception(
-                "get_wiki_graph: relation lookup failed kb=%s node=%s",
+                "get_wiki_graph：关系查找失败 kb=%s 节点=%s",
                 dataset_id,
                 center_slug,
             )
@@ -4723,8 +4669,8 @@ async def get_wiki_graph(
                 continue
             if payload["from"] != center_slug:
                 continue
-            # Hub-node cap: stop accepting more relations once the
-            # to-target set would push us over the entity budget.
+            # 中心节点上限：一旦超过，就停止接受更多关系
+            # 目标设定将使我们超出实体预算。
             if payload["to"] not in entities and len(entities) + len(to_slugs) >= cap:
                 continue
             _add_relation(payload)
@@ -4741,7 +4687,7 @@ async def get_wiki_graph(
                 )
             except Exception:
                 logging.exception(
-                    "get_wiki_graph: neighbour lookup failed kb=%s node=%s",
+                    "get_wiki_graph：邻居查找失败 kb=%s 节点=%s",
                     dataset_id,
                     center_slug,
                 )
@@ -4756,7 +4702,7 @@ async def get_wiki_graph(
             "relations": relations,
         }
 
-    # ---- Flow A — overview, top-weight paged with cumulative budget. ---
+    # ---- 流程 A — 概览、最高权重分页与累积预算。 ---
     cumulative_weight = 0
     page = 1
     while len(entities) < cap:
@@ -4771,7 +4717,7 @@ async def get_wiki_graph(
             )
         except Exception:
             logging.exception(
-                "get_wiki_graph: entity page fetch failed kb=%s page=%d",
+                "get_wiki_graph：实体页面获取失败kb = %s页面= %d",
                 dataset_id,
                 page,
             )
@@ -4779,9 +4725,10 @@ async def get_wiki_graph(
         if not field_map:
             break
 
-        # Preserve weight_int DESC order from ES. Iteration over a dict
-        # produced by get_fields keeps insertion order; ES returned them
-        # sorted, so we can rely on that.
+        # 保留来自 ES 的 weight_int DESC 订单。字典的迭代
+        # get_fields生产的
+        # 保持插入顺序； ES 已退回
+        # 已排序，因此我们可以信赖它。
         page_rows = list(field_map.values())
 
         e_sub: list[dict] = []
@@ -4792,13 +4739,13 @@ async def get_wiki_graph(
             if payload["slug"] in entities:
                 continue
             w = max(0, int(payload.get("weight") or 0))
-            # Step 2: cumulative across the whole flow (per the spec).
-            # Stop when adding this entry would push the budget over.
-            # If even the first entity on a page can't fit, we exit the
-            # outer loop below; this preserves the "least-weight first
-            # excluded" semantics.
-            # if cumulative_weight + w > cap and len(entities) + len(e_sub) > 0:
-            #    break
+            # 步骤 2：整个流程中的累积（根据规范）。
+            # 当添加此条目会超出预算时停止。
+            # 如果页面上的第一个实体都无法容纳，我们就退出
+            # 外循环如下；这保留了“权重最小的优先”
+            # 排除”语义。
+            # 如果 cumulative_weight + w > cap 和 len(实体) + len(e_sub) > 0:
+            # 断线
             cumulative_weight += w
             e_sub.append(payload)
             if len(entities) + len(e_sub) >= cap:
@@ -4810,7 +4757,7 @@ async def get_wiki_graph(
         for payload in e_sub:
             _add_entity(payload)
 
-        # Step 3: relations originating in E_sub.
+        # 步骤 3：源自 E_sub 的关系。
         sub_slugs = [p["slug"] for p in e_sub]
         try:
             rel_map = await _wiki_search_relations_from(
@@ -4820,7 +4767,7 @@ async def get_wiki_graph(
             )
         except Exception:
             logging.exception(
-                "get_wiki_graph: relation page fetch failed kb=%s",
+                "get_wiki_graph：关系页面获取失败 kb=%s",
                 dataset_id,
             )
             rel_map = {}
@@ -4834,7 +4781,7 @@ async def get_wiki_graph(
             if payload["to"] not in entities and payload["to"] not in missing_to:
                 missing_to.append(payload["to"])
 
-        # Step 4: hydrate the to-targets (they count toward the cap).
+        # 步骤 4：水合目标（它们计入上限）。
         if missing_to:
             try:
                 to_map = await _wiki_search_entities_by_slugs(
@@ -4844,7 +4791,7 @@ async def get_wiki_graph(
                 )
             except Exception:
                 logging.exception(
-                    "get_wiki_graph: to-target hydrate failed kb=%s",
+                    "get_wiki_graph：目标水合物失败 kb=%s",
                     dataset_id,
                 )
                 to_map = {}
@@ -4855,7 +4802,7 @@ async def get_wiki_graph(
                 if payload:
                     _add_entity(payload)
 
-        # Step 5: page forward only if the cap allows another iteration.
+        # 步骤 5：仅当上限允许另一次迭代时才向前翻页。
         if len(entities) >= cap or len(page_rows) < page_size:
             break
         page += 1
@@ -4867,17 +4814,16 @@ async def get_wiki_graph(
 
 
 async def clear_wiki(dataset_id: str, tenant_id: str):
-    """Wipe every artifact-related row from ES for this KB.
+    """从 ES 中擦除此 KB 的每个与工件相关的行。
 
-    Touches all artifact ``compile_kwd`` row types the artifact pipeline writes
+    在身份验证失败时触及所有工件“`compile_kwd`` row types the artifact pipeline writes
     (MAP extracts, REDUCE results, PLAN output, drafts, pages, topics, and graph
     rows). After this completes the next "Artifact" run starts from a clean
     slate: no resume cache to short-circuit MAP, no prior pages to reconcile
     against in PLAN.
 
     Returns ``(True, {"deleted": {kwd: count_or_True}})`` on success or
-    ``(False, str)`` on auth failure.
-    """
+    ``(False, str)`”。"""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
         return False, "no authorization"
     _, kb = KnowledgebaseService.get_by_id(dataset_id)
@@ -4887,11 +4833,11 @@ async def clear_wiki(dataset_id: str, tenant_id: str):
         return True, {"deleted": {}}
     index_nm, _ = pack
 
-    # Repair rows damaged by the former doc-page-source upsert before deleting
-    # that bucket. It updated by ``doc_id`` and could stamp ordinary source
-    # chunks as ``wiki_doc_page_source``. Those rows retain chunk content;
-    # genuine tracking rows do not. Removing only the bad marker preserves the
-    # source chunks while allowing the real tracking rows to be cleared below.
+    # 在删除之前修复由之前的 doc-page-source upsert 损坏的行
+    # 那个桶。由“`doc_id`”更新，可以标记普通源
+    # 块为“`wiki_doc_page_source`”。这些行保留块内容；
+    # 正品跟踪行没有。仅删除坏标记可以保留
+    # 源块，同时允许在下面清除真实的跟踪行。
     try:
         from common.doc_store.doc_store_base import OrderByExpr
 
@@ -4929,12 +4875,12 @@ async def clear_wiki(dataset_id: str, tenant_id: str):
             )
         if damaged_row_ids:
             logging.warning(
-                "clear_wiki: repaired %d source chunk(s) mislabeled as wiki_doc_page_source kb=%s",
+                "clear_wiki：已修复 %d 源块错误标记为 wiki_doc_page_source kb=%s",
                 len(damaged_row_ids),
                 dataset_id,
             )
     except Exception:
-        logging.exception("clear_wiki: failed to repair mislabeled source chunks kb=%s", dataset_id)
+        logging.exception("clear_wiki：无法修复错误标记的源块 kb=%s", dataset_id)
         return False, "Failed to repair legacy Wiki state before clearing"
 
     deleted: dict[str, object] = {}
@@ -4945,12 +4891,12 @@ async def clear_wiki(dataset_id: str, tenant_id: str):
                 index_nm,
                 dataset_id,
             )
-            # Different backends return different shapes (int count, dict,
-            # bool). Surface whatever we got so the caller can log it.
+            # 不同的后端返回不同的形状（int count、dict、
+            # 布尔）。显示我们得到的任何内容，以便调用者可以记录它。
             deleted[kwd] = res if res is not None else True
         except Exception:
             logging.exception(
-                "clear_wiki: delete failed for kwd=%s kb=%s",
+                "clear_wiki：kwd = %s kb = %s 删除失败",
                 kwd,
                 dataset_id,
             )
@@ -4963,7 +4909,7 @@ async def clear_wiki(dataset_id: str, tenant_id: str):
             deleted["file_commit_history"] = FileCommitService.delete_all_page_history(dataset_id)
         except Exception:
             logging.exception(
-                "clear_wiki: failed to delete page version history for kb=%s",
+                "clear_wiki：无法删除 kb=%s 的页面版本历史记录",
                 dataset_id,
             )
             deleted["file_commit_history"] = False

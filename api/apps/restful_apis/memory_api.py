@@ -31,25 +31,33 @@ from api.utils.pagination_utils import DEFAULT_PAGE, DEFAULT_PAGE_SIZE, validate
 @login_required
 @validate_request("name", "memory_type", "embd_id", "llm_id")
 async def create_memory():
+    # API 层只校验/解析模型标识并创建 Memory 配置；此时不会创建消息索引。
+    # 第一条消息进入 embed_and_save 时才会按实际 Embedding 维度创建索引。
     timing_enabled = os.getenv("RAGFLOW_API_TIMING")
     t_start = time.perf_counter() if timing_enabled else None
     req = await get_request_json()
     t_parsed = time.perf_counter() if timing_enabled else None
     try:
-        # Resolve tenant_model IDs from model names
+        # 从型号名称解析 tenant_model IDs
         tenant_id = current_user.id
         memory_info = {"name": req["name"], "memory_type": req["memory_type"], "embd_id": req["embd_id"], "llm_id": req["llm_id"]}
         ensure_tenant_model_ids_for_params(tenant_id, memory_info)
         success, res = await memory_api_service.create_memory(memory_info)
         if timing_enabled:
             logging.info(
-                "api_timing create_memory parse_ms=%.2f validate_and_db_ms=%.2f total_ms=%.2f path=%s",
+                "接口耗时 创建记忆 解析请求毫秒=%.2f 校验和数据库毫秒=%.2f 总耗时毫秒=%.2f 路径=%s",
                 (t_parsed - t_start) * 1000,
                 (time.perf_counter() - t_parsed) * 1000,
                 (time.perf_counter() - t_start) * 1000,
                 request.path,
             )
         if success:
+            logging.info(
+                "记忆库已创建 租户ID=%s 记忆库ID=%s 记忆类型=%s",
+                tenant_id,
+                res.get("id", "-") if isinstance(res, dict) else "-",
+                memory_info["memory_type"],
+            )
             return get_json_result(message=True, data=res)
         else:
             return get_json_result(message=res, code=RetCode.SERVER_ERROR)
@@ -58,7 +66,7 @@ async def create_memory():
         logging.error(arg_error)
         if timing_enabled:
             logging.info(
-                "api_timing create_memory error=%s parse_ms=%.2f total_ms=%.2f path=%s",
+                "接口耗时 创建记忆失败 错误=%s 解析请求毫秒=%.2f 总耗时毫秒=%.2f 路径=%s",
                 str(arg_error),
                 (t_parsed - t_start) * 1000,
                 (time.perf_counter() - t_start) * 1000,
@@ -70,7 +78,7 @@ async def create_memory():
         logging.error(e)
         if timing_enabled:
             logging.info(
-                "api_timing create_memory error=%s parse_ms=%.2f total_ms=%.2f path=%s",
+                "接口耗时 创建记忆失败 错误=%s 解析请求毫秒=%.2f 总耗时毫秒=%.2f 路径=%s",
                 str(e),
                 (t_parsed - t_start) * 1000,
                 (time.perf_counter() - t_start) * 1000,
@@ -83,7 +91,7 @@ async def create_memory():
 @login_required
 async def update_memory(memory_id):
     req = await get_request_json()
-    # Resolve tenant_model IDs from model names when name is provided but id is not
+    # 当提供名称但未提供 id 时，从型号名称解析 tenant_model IDs
     ensure_tenant_model_ids_for_params(current_user.id, req)
     new_settings = {
         k: req[k]
@@ -203,10 +211,15 @@ async def get_memory_messages(memory_id):
 @login_required
 @validate_request("memory_id", "agent_id", "session_id", "user_input", "agent_response")
 async def add_message():
+    """保存一轮对话的 RAW Memory，并投递派生记忆抽取任务。
+
+    返回成功表示 RAW 消息已经写入消息索引、Memory Task 已写 MySQL 并投递 Redis；
+    semantic/episodic/procedural 等派生消息仍需等待 Task Executor 消费。
+    """
     req = await get_request_json()
     memory_ids = req["memory_id"]
 
-    # JWT / session users cannot spoof attribution; API-key callers may supply an external subject id.
+    # JWT / 会话用户无法欺骗归因； API-key 调用者可以提供外部主题 ID。
     try:
         trust_client_subject = getattr(g, "auth_type", None) == AUTH_API
     except RuntimeError:
@@ -218,9 +231,19 @@ async def add_message():
         if isinstance(requested_user_id, str) and requested_user_id.strip():
             effective_user_id = requested_user_id.strip()
             from_client = True
-    # The stored subject alone cannot say which path ran, since a client may send the
-    # principal's own id. Record the decision, never the id, which identifies an end user.
-    logging.info("memory message attribution: trusted_client=%s subject=%s", trust_client_subject, "client" if from_client else "principal")
+    # 存储的主题本身无法说明运行的是哪条路径，因为客户端可能会发送
+    # 委托人自己的 id。记录决策，而不是标识最终用户的 ID。
+    logging.info(
+        "记忆消息写入请求已接收 租户ID=%s 记忆库数=%d 智能体ID=%s 会话ID=%s 是否信任客户端用户=%s 用户来源=%s 输入长度=%d 回答长度=%d",
+        current_user.id,
+        len(memory_ids) if isinstance(memory_ids, list) else 1,
+        req["agent_id"],
+        req["session_id"],
+        trust_client_subject,
+        "client" if from_client else "principal",
+        len(str(req["user_input"] or "")),
+        len(str(req["agent_response"] or "")),
+    )
 
     message_dict = {
         "user_id": effective_user_id,
@@ -277,6 +300,7 @@ async def update_message(memory_id: str, message_id: int):
 @manager.route("/messages/search", methods=["GET"])  # noqa: F821
 @login_required
 async def search_message():
+    """在 Memory 独立索引中执行全文与向量混合检索，不读取 Conversation JSON。"""
     args = request.args
     memory_ids = args.getlist("memory_id")
     if len(memory_ids) == 1 and "," in memory_ids[0]:
@@ -296,6 +320,12 @@ async def search_message():
     filter_dict = {"memory_id": memory_ids, "agent_id": agent_id, "session_id": session_id, "user_id": user_id}
     params = {"query": query, "similarity_threshold": similarity_threshold, "keywords_similarity_weight": keywords_similarity_weight, "top_n": top_n}
     res = await memory_api_service.search_message(filter_dict, params)
+    logging.info(
+        "记忆检索完成 租户ID=%s 记忆库ID列表=%s 结果数=%d",
+        current_user.id,
+        memory_ids,
+        len(res),
+    )
     return get_json_result(message=True, data=res)
 
 

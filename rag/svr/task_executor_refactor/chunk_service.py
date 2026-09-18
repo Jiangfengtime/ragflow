@@ -13,16 +13,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Chunk Service Module.
+"""Chunk Service 模块。
 
-Provides [`ChunkService`](rag/svr/task_executor_refactor/chunk_service.py:50) for document chunking,
-post-processing (keywords, questions, metadata, tags), MinIO upload, and chunk insertion into document store.
+提供 [`ChunkService`](rag/svr/task_executor_refactor/chunk_service.py:50) 用于文档分块，
+后处理（关键字、问题、元数据、标签）、MinIO 上传以及将块插入到文档存储中。
 
-This module orchestrates the chunk building pipeline by delegating to:
-- [`chunk_builder`](rag/svr/task_executor_refactor/chunk_builder.py): Parser selection and document chunking
-- [`chunk_post_processor`](rag/svr/task_executor_refactor/chunk_post_processor.py): Post-processing functions
-"""
+该模块通过委托来协调块构建管道：
+- [`chunk_builder`](rag/svr/task_executor_refactor/chunk_builder.py)：解析器选择和文档分块
+- [`chunk_post_processor`](rag/svr/task_executor_refactor/chunk_post_processor.py): 后处理函数"""
 
 import asyncio
 import copy
@@ -45,7 +43,7 @@ from rag.svr.task_executor_refactor.constants import GRAPH_RAPTOR_FAKE_DOC_ID
 from rag.svr.task_executor_refactor.task_context import TaskContext
 from rag.utils.base64_image import image2id
 
-# Re-export for backward compatibility
+# 重新导出以实现向后兼容
 from rag.svr.task_executor_refactor.chunk_builder import (
     get_parser,
     run_chunking,
@@ -61,11 +59,10 @@ from rag.svr.task_executor_refactor.chunk_post_processor import (
 
 
 def apply_document_availability(chunks: List[Dict[str, Any]], status) -> int:
-    """Stamp ordinary source chunks available_int=0 when document status is disabled.
+    """当文档状态禁用时，标记普通源块 available_int=0。
 
-    Compiled products (compile_kwd) are left alone — they are already non-searchable.
-    Returns the number of ordinary source chunks stamped.
-    """
+    已编译的产品 (compile_kwd) 被保留 - 它们已经不可搜索。
+    返回标记的普通源块的数量。"""
     if str(status if status is not None else "1") != "0":
         return 0
     stamped = 0
@@ -78,11 +75,10 @@ def apply_document_availability(chunks: List[Dict[str, Any]], status) -> int:
 
 
 def apply_source_chunks_document_availability(chunks: List[Dict[str, Any]]) -> None:
-    """Apply each source document's status to its ordinary (non-RAPTOR) chunks.
+    """将每个源文档的状态应用于其普通（非 RAPTOR）块。
 
-    Mixed RAPTOR batches can carry chunks from multiple documents; stamp each
-    group from its own document status instead of the first doc_id in the batch.
-    """
+    混合RAPTOR批次可以携带来自多个文档的块；每个都盖上印章
+    组从其自己的文档状态而不是批次中的第一个 doc_id 。"""
     source_chunks_by_doc_id: Dict[str, List[Dict[str, Any]]] = {}
     for ck in chunks:
         if ck.get("raptor_kwd"):
@@ -100,37 +96,35 @@ def apply_source_chunks_document_availability(chunks: List[Dict[str, Any]]) -> N
         stamped = apply_document_availability(source_chunks, status)
         if stamped:
             logging.info(
-                "document %s is disabled; stamped available_int=0 on %d ordinary source chunk(s)",
+                "文档 %s 已禁用；在 %d 普通源块上标记 available_int=0",
                 doc_id,
                 stamped,
             )
 
 
 class ChunkService:
-    """Service for document chunking and post-processing.
+    """Service 用于文档分块和后处理。
 
-    This service handles:
-    - Document chunking via parser modules (delegated to chunk_builder)
-    - MinIO upload of chunk images
-    - Keyword extraction (delegated to chunk_post_processor)
-    - Question generation (delegated to chunk_post_processor)
-    - Metadata generation (delegated to chunk_post_processor)
-    - Content tagging (delegated to chunk_post_processor)
-    - Table of contents generation
-    - Chunk insertion into document store
+    该服务处理：
+    - 通过解析器模块进行 Document 分块（委托给 chunk_builder）
+    - MinIO 上传块图像
+    - 关键词提取（委托chunk_post_processor）
+    - 问题生成（委托给chunk_post_processor）
+    - 元数据生成（委托给chunk_post_processor）
+    - 内容标记（委托给chunk_post_processor）
+    - 目录生成
+    - Chunk 插入文档存储
 
-    All intermediate results are recorded via RecordingContext for comparison.
-    """
+    所有中间结果均通过RecordingContext记录以供比较。"""
 
     def __init__(
         self,
         ctx: TaskContext,
     ):
-        """Initialize ChunkService.
+        """初始化ChunkService。
 
-        Args:
-            ctx: TaskContext containing task configuration and execution resources.
-        """
+        参数：
+            ctx: TaskContext 包含任务配置和执行资源。"""
         self._task_context = ctx
 
     @timeout(60 * 80, 1)
@@ -139,23 +133,22 @@ class ChunkService:
         storage_binary: bytes,  # 从对象存储读取的完整原文件二进制。
         on_chunking_start=None,  # 取得 Chunk 并发许可后的回调，用于排除排队耗时。
     ) -> List[Dict[str, Any]]:
-        """Build chunks from document binary.
+        """从文档二进制构建块。
 
-        This is the main entry point for chunk building. It orchestrates:
-        1. File size validation
-        2. Parser selection and chunking (delegated to chunk_builder)
-        3. Outline extraction (delegated to chunk_builder)
-        4. MinIO upload
-        5. Post-processing (delegated to chunk_post_processor)
+        这是块构建的主要入口点。它精心策划：
+        1. File尺寸验证
+        2.解析器选择和分块（委托给chunk_builder）
+        3.轮廓提取（委托chunk_builder）
+        4.MinIO上传
+        5、后处理（委托chunk_post_processor）
 
-        Args:
-            storage_binary: Binary content of the document.
+        参数：
+            storage_binary：文档的二进制内容。
 
-        Returns:
-            List of chunk dictionaries ready for embedding.
-        """
+        返回：
+            准备嵌入的块字典列表。"""
         ctx = self._task_context
-        # Validate file size
+        # 验证文件大小
         # 这里使用的是 MySQL 文档记录中的 size，不是重新计算 len(storage_binary)
         if ctx.size > settings.DOC_MAXIMUM_SIZE:
             self._progress(prog=-1, msg="File size exceeds( <= %dMb )" % (int(settings.DOC_MAXIMUM_SIZE / 1024 / 1024)))
@@ -164,11 +157,11 @@ class ChunkService:
         ctx.recording_context.record("file_size_exceeded", False)
         ctx.recording_context.record("parser_id", ctx.parser_id)
 
-        # Get parser
+        # 获取解析器
         # 根据 parser_id 选择解析器
         chunker = get_parser(ctx.parser_id)
 
-        # record config for compare
+        # 记录配置进行比较
         chunk_config = {
             "parser_id": ctx.parser_id,
             "chunk_token_num": ctx.parser_config.get("chunk_token_num", 128),
@@ -186,24 +179,24 @@ class ChunkService:
         # 会在 chunk_limiter 保护下把它放入线程池。返回的 cks 只是内存中的原始 Chunk。
         cks = await run_chunking(chunker, storage_binary, ctx, on_chunking_start)
 
-        # Record raw chunks
+        # 记录原始块
         self._task_context.recording_context.record("raw_chunks", cks)
 
         # PDF parser 可能把目录临时放在首个 Chunk 的 __outline__ 中；这里取出并写入
         # MySQL 文档元数据，避免 __outline__ 作为普通 Chunk 字段进入 ES。
-        # Extract outline (delegated)
+        # 摘录大纲（委托）
         await extract_outline(cks, ctx)
 
         # 给每个 Chunk 补充 doc_id/kb_id、稳定 Chunk ID 和时间字段；如果 Chunk 携带图片，
         # 图片写入对象存储，Chunk 中只保留可用于反查图片的 img_id。
         docs = await self._prepare_docs_and_upload(cks)
 
-        # Record docs after prep
+        # 准备后记录文档
         self._task_context.recording_context.record("docs_after_prep", docs)
 
         # 以下后处理均发生在 Embedding 之前，因为 important_kwd/question_kwd/tag_kwd 等字段
         # 既会参与最终 ES 文档，也可能影响后续文本拼接与查询排序。是否执行由 parser_config 控制。
-        # Post-processing (delegated to chunk_post_processor)
+        # 后处理（委托给chunk_post_processor）
         if ctx.parser_config.get("auto_keywords", 0):
             await extract_keywords(docs, ctx)
         keywords = [d for d in docs if d.get("important_kwd")]
@@ -225,7 +218,7 @@ class ChunkService:
         tags_applied = [d for d in docs if d.get(TAG_FLD)]
         self._task_context.recording_context.record("tags_applied", tags_applied)
 
-        # Record final chunks
+        # 记录最终块
         self._task_context.recording_context.record("final_chunks", docs)
         final_chunk_ids = [c.get("id") for c in docs if isinstance(c, dict) and "id" in c]
         self._task_context.recording_context.record("final_chunk_ids_count", len(final_chunk_ids))
@@ -233,7 +226,7 @@ class ChunkService:
         return docs
 
     async def _prepare_docs_and_upload(self, cks: List[Dict]) -> List[Dict]:
-        """Prepare docs and upload images to MinIO."""
+        """准备文档并将图片上传到MinIO。"""
         ctx = self._task_context
         docs = []
         doc = {"doc_id": ctx.doc_id, "kb_id": str(ctx.kb_id)}
@@ -287,12 +280,12 @@ class ChunkService:
         return docs
 
     def _progress(self, prog=None, msg=None):
-        """Progress callback helper."""
+        """进度回调帮助程序。"""
         if prog is not None or msg is not None:
             self._task_context.progress_cb(prog=prog, msg=msg)
 
     # =========================================================================
-    # Insert Service Methods (merged from insert_service.py)
+    # 插入 Service 方法（从 insert_service.py 合并）
     # =========================================================================
 
     async def insert_chunks(
@@ -303,23 +296,22 @@ class ChunkService:
         chunks: List[Dict[str, Any]],
         doc_bulk_size: int = None,
     ) -> bool:
-        """Insert chunks into document store.
+        """将块插入文档存储。
 
-        Args:
-            task_id: Task identifier.
-            task_tenant_id: Tenant ID.
-            task_dataset_id: Dataset/knowledge base ID.
-            chunks: List of chunk dictionaries to insert.
-            doc_bulk_size: Batch size for document store inserts.
+        参数：
+            task_id：Task 标识符。
+            task_tenant_id：租户ID。
+            task_dataset_id：Dataset/knowledge底座ID。
+            chunks：要插入的块字典列表。
+            doc_bulk_size：文档存储插入的批量大小。
 
-        Returns:
-            True if all chunks were inserted successfully, False otherwise.
-        """
+        返回：
+            如果所有块均已成功插入，则为 True，否则为 False。"""
         # 这里才进入 Chunk 的持久化阶段。docs/chunks 在此前始终只存在于 Worker 内存中。
         # docStoreConn 是统一抽象；当前 DOC_ENGINE=elasticsearch 时实际调用 ESConnection.insert。
         doc_bulk_size = doc_bulk_size or settings.DOC_BULK_SIZE
         logging.info(
-            "chunk_indexing_started task_id=%s doc_id=%s kb_id=%s chunk_count=%d bulk_size=%d",
+            "文档切片开始写入检索存储 任务ID=%s 文档ID=%s 知识库ID=%s 切片数量=%d 批次大小=%d",
             task_id,
             self._task_context.doc_id,
             task_dataset_id,
@@ -331,17 +323,17 @@ class ChunkService:
 
         # 某些 parser 会产生 mom/mom_with_weight（父级摘要）。父 Chunk 单独写入 doc store，
         # 子 Chunk 通过 mom_id 关联；父 Chunk available_int=0，不参与普通直接召回。
-        # Create mother chunks (summary chunks)
+        # 创建母块（汇总块）
         mothers = self._create_mother_chunks(chunks)
 
-        # Insert mother chunks
+        # 插入母块
         if not await self._insert_mother_chunks(task_id, task_tenant_id, task_dataset_id, mothers, doc_bulk_size):
             return False
 
-        # Insert main chunks
+        # 插入主块
         inserted = await self._insert_main_chunks(task_id, task_tenant_id, task_dataset_id, chunks, doc_bulk_size)
         logging.info(
-            "chunk_indexing_completed task_id=%s doc_id=%s chunk_count=%d success=%s",
+            "文档切片写入检索存储完成 任务ID=%s 文档ID=%s 切片数量=%d 是否成功=%s",
             task_id,
             self._task_context.doc_id,
             len(chunks),
@@ -350,11 +342,10 @@ class ChunkService:
         return inserted
 
     def _apply_document_availability(self, chunks: List[Dict[str, Any]]) -> None:
-        """Hide source chunks when the owning document is disabled (status=0).
+        """当所属文档被禁用（状态 = 0）时隐藏源块。
 
-        Disabling before parse only updates MySQL; later inserts would otherwise
-        default to available_int=1 and remain retrievable.
-        """
+        在解析之前禁用仅更新MySQL；否则以后的插入会
+        默认为 available_int=1 并保持可检索。"""
         doc_id = self._task_context.doc_id
         if not doc_id or doc_id == GRAPH_RAPTOR_FAKE_DOC_ID:
             return
@@ -364,17 +355,16 @@ class ChunkService:
         stamped = apply_document_availability(chunks, getattr(doc, "status", "1"))
         if stamped:
             logging.info(
-                "document %s is disabled; stamped available_int=0 on %d ordinary source chunk(s)",
+                "文档 %s 已禁用；在 %d 普通源块上标记 available_int=0",
                 doc_id,
                 stamped,
             )
 
     @classmethod
     def _create_mother_chunks(cls, chunks: List[Dict]) -> List[Dict]:
-        """Create mother chunks from summary fields.
+        """从汇总字段创建母块。
 
-        Mother chunks are summary/abstract chunks that are stored separately.
-        """
+        母块是单独存储的 summary/abstract 块。"""
         mothers = []
         mother_ids = set()
 
@@ -395,7 +385,7 @@ class ChunkService:
             mom_ck["content_with_weight"] = mom
             mom_ck["available_int"] = 0
 
-            # Keep only essential fields
+            # 仅保留必要字段
             allowed_fields = ["id", "content_with_weight", "doc_id", "docnm_kwd", "kb_id", "available_int", "position_int", "create_timestamp_flt", "page_num_int", "top_int"]
             for fld in list(mom_ck.keys()):
                 if fld not in allowed_fields:
@@ -413,7 +403,7 @@ class ChunkService:
         mothers: List[Dict],
         doc_bulk_size: int,
     ) -> bool:
-        """Insert mother chunks in batches."""
+        """批量插入母块。"""
         for b in range(0, len(mothers), doc_bulk_size):
             await self._intercept_doc_store_insert(mothers[b : b + doc_bulk_size], search.index_name(task_tenant_id), task_dataset_id, refresh=False)
 
@@ -431,7 +421,7 @@ class ChunkService:
 
     async def _intercept_doc_store_insert(self, chunks: list, index_name: str, task_dataset_id: str, refresh: str | bool = "wait_for") -> Any:
         if self._task_context.write_interceptor:
-            if self._task_context.doc_id == GRAPH_RAPTOR_FAKE_DOC_ID:  # raptor - non-determinisic
+            if self._task_context.doc_id == GRAPH_RAPTOR_FAKE_DOC_ID:  # 猛禽 - 不确定
                 return self._task_context.write_interceptor.intercept("docStoreConn.insert", [])
             return self._task_context.write_interceptor.intercept("docStoreConn.insert")
         else:
@@ -446,10 +436,10 @@ class ChunkService:
         chunks: List[Dict],
         doc_bulk_size: int,
     ) -> bool:
-        """Insert main chunks in batches with cancellation handling."""
-        # Persist task chunk IDs periodically instead of once per bulk request.
-        # This keeps the task resumable while avoiding one MySQL transaction for
-        # every small document-store batch.
+        """批量插入主块并进行取消处理。"""
+        # 定期保留任务块 IDs，而不是每个批量请求一次。
+        # 这使任务可恢复，同时避免一个 MySQL 事务
+        # 每个小文档存储批次。
         checkpoint_batches = max(1, 256 // doc_bulk_size)
         last_checkpoint = 0
         for b in range(0, len(chunks), doc_bulk_size):
@@ -457,7 +447,7 @@ class ChunkService:
             doc_store_result = await self._intercept_doc_store_insert(chunks[b : b + doc_bulk_size], search.index_name(task_tenant_id), task_dataset_id, refresh=False)
 
             if self._task_context.has_canceled_func(task_id):
-                # Roll back partial RAPTOR summary inserts
+                # 回滚部分 RAPTOR 摘要插入
                 await self._rollback_raptor_chunks(task_id, task_tenant_id, task_dataset_id, chunks, b, doc_bulk_size)
                 self._task_context.progress_cb(-1, msg="Task has been canceled.")
                 return False
@@ -478,7 +468,7 @@ class ChunkService:
             if is_last_batch or batch_end - last_checkpoint >= checkpoint_batches * doc_bulk_size:
                 chunk_ids = [chunk["id"] for chunk in chunks[:batch_end]]
                 if not await self._update_task_chunk_ids(task_id, chunk_ids):
-                    # Roll back on failure
+                    # 失败回滚
                     await self._rollback_insertion(task_tenant_id, task_dataset_id, chunk_ids)
                     self._task_context.progress_cb(-1, msg=f"Chunk updates failed since task {task_id} is unknown.")
                     return False
@@ -501,25 +491,25 @@ class ChunkService:
         up_to_batch: int,
         doc_bulk_size: int,
     ):
-        """Roll back partial RAPTOR summary inserts after cancellation."""
+        """取消后回滚部分RAPTOR 摘要插入。"""
         raptor_ids = [c["id"] for c in chunks[: up_to_batch + doc_bulk_size] if c.get("raptor_kwd") == "raptor"]
 
         if raptor_ids:
             try:
                 await self._intercept_doc_store_delete({"id": raptor_ids}, search.index_name(task_tenant_id), task_dataset_id)
                 logging.info(
-                    "insert_chunks: rolled back %d partial RAPTOR chunks after cancellation (task=%s)",
+                    "insert_chunks：取消后回滚%d部分RAPTOR块（任务= %s）",
                     len(raptor_ids),
                     task_id,
                 )
             except Exception:
                 logging.exception(
-                    "insert_chunks: failed to roll back partial RAPTOR chunks after cancellation (task=%s)",
+                    "insert_chunks：取消后无法回滚部分 RAPTOR 块（任务 = %s）",
                     task_id,
                 )
 
     async def _update_task_chunk_ids(self, task_id: str, chunk_ids: List[str]) -> bool:
-        """Update chunk IDs in the task record."""
+        """更新任务记录中的块 IDs。"""
         from peewee import DoesNotExist
 
         try:
@@ -542,10 +532,10 @@ class ChunkService:
         task_dataset_id: str,
         chunk_ids: List[str],
     ):
-        """Roll back an insertion by deleting chunks and images."""
+        """通过删除块和图像来回滚插入。"""
         await self._intercept_doc_store_delete({"id": chunk_ids}, search.index_name(task_tenant_id), task_dataset_id)
 
-        # Delete associated images
+        # 删除关联图像
         tasks = []
         for chunk_id in chunk_ids:
             tasks.append(asyncio.create_task(self._delete_image(task_dataset_id, chunk_id)))
@@ -560,7 +550,7 @@ class ChunkService:
             raise
 
     async def _delete_image(self, kb_id: str, chunk_id: str):
-        """Delete a chunk's image from storage."""
+        """从存储中删除块的图像。"""
         try:
             async with self._task_context.minio_limiter:
                 settings.STORAGE_IMPL.delete(kb_id, chunk_id)

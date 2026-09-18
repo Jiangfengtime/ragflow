@@ -32,7 +32,7 @@ from common.misc_utils import thread_pool_exec
 
 
 def build_fusion_expr(topn: int, vector_similarity_weight: float = 0.3) -> FusionExpr:
-    """Build the Infinity weighted-sum expression from the vector weight."""
+    """根据向量权重构造 Infinity 的加权求和表达式。"""
     term_similarity_weight = 1 - vector_similarity_weight
     return FusionExpr(
         "weighted_sum",
@@ -89,11 +89,9 @@ class Dealer:
         return await thread_pool_exec(_load)
 
     async def _prune_deleted_chunks(self, sres: SearchResult) -> SearchResult:
-        # Temporary safety net:
-        # Some delete paths can leave stale chunks in the doc store if the DB row
-        # is removed but the vector record is not fully cleaned up. We filter those
-        # chunks here so chat/retrieval does not surface content from deleted docs.
-        # Keep this as a fallback, not as the primary delete mechanism.
+        # 临时兜底保护：部分删除链路可能只删除 MySQL 文档记录，而未完整清理检索存储中的
+        # Chunk。这里过滤这些孤立 Chunk，避免聊天或检索返回已删除文档的内容；它不是主要
+        # 删除机制，正常流程仍应在删除文档时同步清理检索存储。
         chunk_doc_ids = [chunk.get("doc_id") for chunk in sres.field.values() if chunk and chunk.get("doc_id")]
         if not chunk_doc_ids:
             return sres
@@ -120,7 +118,7 @@ class Dealer:
                 filtered_highlight[chunk_id] = sres.highlight[chunk_id]
 
         if removed:
-            logging.warning("Pruned %s stale chunks whose documents no longer exist.", removed)
+            logging.warning("已修剪 %s 文档不再存在的陈旧块。", removed)
 
         return self.SearchResult(
             total=len(filtered_ids),
@@ -138,7 +136,7 @@ class Dealer:
         for key, field in {"kb_ids": "kb_id", "doc_ids": "doc_id"}.items():
             if key in req and req[key] is not None:
                 condition[field] = req[key]
-        # TODO(yzc): `available_int` is nullable however infinity doesn't support nullable columns.
+        # TODO(yzc)：`available_int` 可为空，但无穷大不支持可为空的列。
         for key in ["id", "knowledge_graph_kwd", "available_int", "entity_kwd", "from_entity_kwd", "to_entity_kwd", "removed_kwd"]:
             if key in req and req[key] is not None:
                 condition[key] = req[key]
@@ -161,7 +159,7 @@ class Dealer:
         orderBy = OrderByExpr()
 
         pg = int(req.get("page", 1)) - 1
-        # Result pagination is independent of the KNN candidate pool size.
+        # 最终结果分页与 KNN 候选池大小彼此独立。
         ps = int(req.get("size", 30))
         offset, limit = pg * ps, ps
 
@@ -234,19 +232,19 @@ class Dealer:
                 # num_candidates 是 HNSW 在每个分片中考察的候选规模，后者越大通常越准但越慢。
                 matchDense = await self.get_vector(qst, emb_mdl, top_k=knn_top_k, num_candidates=knn_num_candidates, similarity=req.get("similarity", 0.1))
                 q_vec = matchDense.embedding_data
-                # ES path no longer fetches chunk vectors here. The clean
-                # cosine score is recovered later via a second KNN-only call
-                # in retrieval(); chunk vectors are fetched on demand for
-                # citations (see Dealer.fetch_chunk_vectors). OceanBase
-                # still relies on local rerank against chunk vectors, so
-                # keep pulling them for that backend.
+                # ES 路径不再在此处获取块向量。干净的
+                # 余弦分数稍后通过第二个 KNN-only 调用恢复
+                # 在检索();块向量按需获取
+                # 引用（参见 Dealer.fetch_chunk_vectors）。 OceanBase
+                # 仍然依赖于块向量的本地重新排序，因此
+                # 继续将它们拉到该后端。
                 if settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_SERENEDB:
                     src.append(f"q_{len(q_vec)}_vec")
 
                 if settings.DOC_ENGINE_INFINITY:
                     vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3))
                     logging.debug(
-                        "Dealer.search fusion: knn_top_k=%s vector_similarity_weight=%s",
+                        "Dealer.search融合：knn_top_k=%s vector_similarity_weight=%s",
                         knn_top_k,
                         vector_similarity_weight,
                     )
@@ -331,12 +329,12 @@ class Dealer:
                         i += 1
                     pieces_.append("".join(pieces[st:i]) + "\n")
                 else:
-                    # Sentence boundary regex includes Arabic punctuation (، ؛ ؟ ۔)
+                    # 句子边界正则表达式包含阿拉伯标点符号 (Ì Û Ô)
                     pieces_.extend(re.split(r"([^\|][；。？!！،؛؟۔\n]|[a-z\u0600-\u06FF][.?;!،؛؟][ \n])", pieces[i]))
                     i += 1
             pieces = pieces_
         else:
-            # Sentence boundary regex includes Arabic punctuation (، ؛ ؟ ۔)
+            # 句子边界正则表达式包含阿拉伯标点符号 (Ì Û Ô)
             pieces = re.split(r"([^\|][；。？!！،؛؟۔\n]|[a-z\u0600-\u06FF][.?;!،؛؟][ \n])", answer)
         for i in range(1, len(pieces)):
             if re.match(r"([^\|][；。？!！،؛؟۔\n]|[a-z\u0600-\u06FF][.?;!،؛؟][ \n])", pieces[i]):
@@ -420,17 +418,15 @@ class Dealer:
         return np.array(rank_fea, dtype=float) * 10.0
 
     def _rank_feature_scores(self, query_rfea, search_res):
-        ## For rank feature(tag_fea) scores.
+        # 对于排名特征（tag_fea）分数。
         pageranks = np.array([search_res.field[chunk_id].get(PAGERANK_FLD, 0) for chunk_id in search_res.ids], dtype=float)
         return self._tag_feature_scores(query_rfea, search_res) + pageranks
 
     async def _knn_scores(self, sres: "Dealer.SearchResult", idx_names: str | list[str], kb_ids: list[str]) -> dict[str, float]:
-        """
-        Second-pass ES call that returns the cosine similarity between the
-        query embedding and each candidate chunk's embedding, filtered to the
-        chunk ids the original search already surfaced. We rely on ES to do
-        the vector math so the chunk vectors never leave the engine.
-        """
+        """第二遍 ES 调用，返回
+        查询嵌入和每个候选块的嵌入，过滤到
+        chunk ids 原始搜索已经浮出水面。我们靠ES来做
+        向量数学，因此块向量永远不会离开引擎。"""
         if not sres.ids or not sres.query_vector:
             return {}
         # 第二次查询只允许命中第一阶段已经召回的 Chunk ID。它不会扩大候选集合，
@@ -447,7 +443,7 @@ class Dealer:
         condition = {"id": list(sres.ids)}
         res = await thread_pool_exec(
             self.dataStore.search,
-            [],  # no _source fields needed; we only want _id and _score
+            [],  # 不需要 _source 字段；我们只想要 _id 和 _score
             [],
             condition,
             [matchDense],
@@ -460,12 +456,10 @@ class Dealer:
         return self.dataStore.get_scores(res)
 
     async def fetch_chunk_vectors(self, chunk_ids: list[str], tenant_ids: str | list[str], kb_ids: list[str], dim: int) -> dict[str, list[float]]:
-        """
-        Citation-time helper: fetch only the embedding vectors for an
-        explicit set of chunk ids. Used by callers that need to compute
-        answer-vs-chunk similarity locally (e.g. insert_citations) so the
-        main retrieval path can keep skipping vector transport.
-        """
+        """引用时间助手：仅获取嵌入向量
+        明确的块 ID 集。供需要计算的调用者使用
+        本地答案与块的相似度（e.g.insert_citations）所以
+        主检索路径可以继续跳过矢量传输。"""
         if not chunk_ids:
             return {}
         if isinstance(tenant_ids, str):
@@ -498,12 +492,10 @@ class Dealer:
         return out
 
     def rerank_with_knn(self, sres, query, knn_scores: dict[str, float], tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None):
-        """
-        Merge ES-side KNN cosine similarity with locally computed term
-        similarity using the user-configured weights. Replaces the older
-        local-only rerank() for the ES path, which depended on shipping
-        chunk vectors back to the application.
-        """
+        """将 ES 侧 KNN 余弦相似度与本地计算项合并
+        使用用户配置的权重来计算相似度。替换旧的
+        ES 路径的仅本地 rerank()，这取决于运输
+        块向量返回到应用程序。"""
         _, keywords = self.qryr.question(query)
 
         for i in sres.ids:
@@ -561,7 +553,7 @@ class Dealer:
             tks = content_ltks + title_tks * 2 + important_kwd * 5 + question_tks * 6
             ins_tw.append(tks)
 
-        ## For rank feature(tag_fea) scores.
+        # 对于排名特征（tag_fea）分数。
         rank_fea = self._rank_feature_scores(rank_feature, sres)
 
         sim, tksim, vtsim = self.qryr.hybrid_similarity(sres.query_vector, ins_embd, keywords, ins_tw, tkweight, vtweight)
@@ -579,7 +571,7 @@ class Dealer:
         # 构造候选文档文本
         # 每个候选的输入由三部分构成：1. Chunk正文分词、2. 文档标题分词、3. 重要关键词
         for i in sres.ids:
-            # content_ltks = list(OrderedDict.fromkeys(sres.field[i][cfield].split()))
+            # content_ltks = 列表(OrderedDict.fromkeys(sres.field[i][cfield].split()))
             content_ltks = sres.field[i][cfield].split()
             title_tks = [t for t in sres.field[i].get("title_tks", "").split() if t]
             important_kwd = sres.field[i].get("important_kwd", [])
@@ -593,16 +585,15 @@ class Dealer:
         # 这不是 ES 返回的原始 BM25 _score，而是 RAGFlow 在 Python 中重新计算的词项匹配分数。
         tksim = self.qryr.token_similarity(keywords, ins_tw)
 
-        # rerank_mdl.similarity() returns scores normalized to [0, 1] for every
-        # provider (see RerankModel.Base.similarity), so the blend below stays
-        # on a single scale regardless of the configured reranker.
+        # 所有供应商的 rerank_mdl.similarity() 都会返回归一化到 [0, 1] 的分数
+        # （参见 RerankModel.Base.similarity），因此更换重排模型不会改变后续融合的量纲。
         # 调用 Rerank 模型
         # Rerank模型一次接收: 一个问题 + 多个候选Chunk
         # 然后分别判断问题与每个Chunk的相关程度
         # 返回值不再是Embedding 余弦相似度, 而是Rerank模型分数
         vtsim, _ = rerank_mdl.similarity(query, docs)
 
-        ## For rank feature(tag_fea) scores.
+        # 对于排名特征（tag_fea）分数。
         # 计算标签和 PageRank 加分, 包含: 问题标签与Chunk标签匹配分数 + Chunk的PageRank分数,
         # 没有配置标签或PageRank时, 一般为0
         rank_fea = self._rank_feature_scores(rank_feature, sres)
@@ -619,27 +610,28 @@ class Dealer:
     # 2. 融合候选
     # 3. 内置混合打分或Rerank模型
     # 4. 相似度阈值 + top N 截断
-    # 5. chunks + doc_aggs
+    # 5. 块 + doc_aggs
+    # 当指定 rerank_mdl 时，
     async def retrieval(
         self,
         question,
         embd_mdl,
         tenant_ids,
         kb_ids,
-        page,  # MUST be 1 when rerank_mdl is specified
-        page_size,  # it is topn when rerank_mdl is specified
-        similarity_threshold=0.2, # 最低相似度门槛
-        vector_similarity_weight=0.3, # 语义向量相对于词法匹配的权重(相当于向量权重0.3, 文本权重0.7)
+        page,  # MUST 为 1
+        page_size,  # 当指定 rerank_mdl 时为 topn
+        similarity_threshold=0.2,  # 最低相似度门槛
+        vector_similarity_weight=0.3,  # 语义向量相对于词法匹配的权重(相当于向量权重0.3, 文本权重0.7)
         doc_ids=None,
         aggs=True,
-        rerank_mdl=None, # 可选的专用重排模型
+        rerank_mdl=None,  # 可选的专用重排模型
         highlight=False,
         rank_feature: dict | None = {PAGERANK_FLD: 10},
         trace_id=None,
         must_not: dict | None = None,
         rerank_candidates_count=64,
-        knn_top_k=1024,  # Advanced knn parameter
-        knn_num_candidates=2048,  # Advanced knn parameter
+        knn_top_k=1024,  # 高级 knn 参数
+        knn_num_candidates=2048,  # 高级 knn 参数
     ):
         """
         两阶段混合检索：search() 先从 doc store 快速召回候选；随后按后端能力取得
@@ -684,7 +676,7 @@ class Dealer:
             "question": question,
             "vector": True,
             "similarity": similarity_threshold,
-            "available_int": 1, # available_int=1 表示只检索当前可用的 Chunk
+            "available_int": 1,  # available_int=1 表示只检索当前可用的 Chunk
             "vector_similarity_weight": vector_similarity_weight,
             "knn_top_k": knn_top_k,
             "knn_num_candidates": knn_num_candidates,
@@ -704,16 +696,13 @@ class Dealer:
         # 调用search()进行第一阶段召回
         sres = await self.search(req, idx_names, kb_ids, embd_mdl, highlight, rank_feature=rank_feature, min_match=min_match)
         logging.info(
-            "retrieval_candidates trace_id=%s indexes=%s kb_count=%d candidate_count=%d min_match=%s",
+            "检索候选集已获取 跟踪ID=%s 索引=%s 知识库数=%d 候选数=%d 最小匹配=%s",
             trace_id or "-",
             idx_names,
             len(kb_ids),
             sres.total,
             min_match,
         )
-        # Temporary retrieval-side guard: prune chunks whose parent document no
-        # longer exists before reranking and returning results.
-
         # 兜底保护: [正常情况下, 删除文档时应该同步删除ES Chunk]
         # 过滤掉所属文档已经从Mysql删除, 但仍残留在ES中的Chunk.
         sres = await self._prune_deleted_chunks(sres)
@@ -723,7 +712,7 @@ class Dealer:
 
         term_similarity_weight = 1 - vector_similarity_weight
         logging.debug(
-            "[Search] retrieval weights: trace_id=%s kb_count=%s similarity_threshold=%s vector_similarity_weight=%s full_text_weight=%s rerank_enabled=%s",
+            "[Search] 检索权重：跟踪ID=%s kb_count=%s similarity_threshold=%s vector_similarity_weight=%s full_text_weight=%s rerank_enabled=%s",
             trace_id,
             len(kb_ids),
             similarity_threshold,
@@ -748,14 +737,13 @@ class Dealer:
             )
         else:
             if settings.DOC_ENGINE_INFINITY:
-                # Don't need rerank here since Infinity normalizes each way score before fusion.
+                # Infinity 会在融合前归一化每一路分数，因此这里不需要再次重排。
                 sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sim = [s if s is not None else 0.0 for s in sim]
                 tsim = sim
                 vsim = sim
             elif settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_SERENEDB:
-                # OceanBase still returns chunk vectors in the result; use
-                # the historical local rerank that depends on them.
+                # OceanBase 仍在结果中返回 Chunk 向量，因此沿用依赖向量的本地重排逻辑。
                 sim, tsim, vsim = self.rerank(
                     sres,
                     question,
@@ -764,23 +752,20 @@ class Dealer:
                     rank_feature=rank_feature,
                 )
             elif settings.DOC_ENGINE_GAUSSDB:
-                # GaussDB computes fusion and PageRank in SQL; tag features are
-                # applied locally to the returned candidate window.
+                # GaussDB 在 SQL 中计算融合分数和 PageRank；标签特征在返回的候选窗口上本地叠加。
                 sql_scores = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sql_scores = np.array([s if s is not None else 0.0 for s in sql_scores], dtype=np.float64)
                 sim = sql_scores + self._tag_feature_scores(rank_feature, sres)
                 tsim = sql_scores
                 vsim = sql_scores
             else:
-                # ES path: ask ES for the clean cosine score via a second
-                # KNN-only call filtered by the candidate ids, then merge it
-                # with locally computed term similarity using the user's
-                # weight. Chunk vectors stay in the index.
+                # ES 路径：对第一阶段候选 ID 再执行一次纯 KNN 查询，取得干净的余弦分数，
+                # 然后按用户权重与本地计算的词项相似度融合；Chunk 向量始终保留在索引中。
                 # ES 默认路径的第二阶段：先取得候选的纯 KNN 分数，再与 Python 计算的
                 # token_similarity 融合。这里的文本分数不是第一阶段 ES 返回的 BM25 _score。
                 knn_scores = await self._knn_scores(sres, idx_names, kb_ids)
                 # 真正应用用户配置的权重：
-                # final = (1-vector_weight)*term_score + vector_weight*knn_score + tag/PageRank。
+                # 最终 = (1-vector_weight)*term_score + vector_weight*knn_score + tag/PageRank。
                 sim, tsim, vsim = self.rerank_with_knn(
                     sres,
                     question,
@@ -795,7 +780,7 @@ class Dealer:
             ranks["doc_aggs"] = []
             return ranks
 
-        # Use stable sort for deterministic ordering when scores are tied
+        # 使用稳定排序，保证分数相同时的结果顺序可复现。
         # 按 sim 降序排列
         sorted_idx = np.argsort(sim_np * -1, kind="stable")
 
@@ -820,7 +805,7 @@ class Dealer:
         page_idx = valid_idx[begin:end]
 
         logging.info(
-            "retrieval_ranked trace_id=%s candidate_count=%d valid_count=%d page=%d page_size=%d returned_count=%d rerank=%s",
+            "检索候选集排序完成 跟踪ID=%s 候选数=%d 有效数=%d 页码=%d 每页数量=%d 返回数=%d 是否重排=%s",
             trace_id or "-",
             sres.total,
             filtered_count,
@@ -842,11 +827,9 @@ class Dealer:
             did = chunk.get("doc_id", "")
 
             position_int = chunk.get("position_int", [])
-            # Chunk vectors are no longer fetched during the main retrieval
-            # call. Fall back to whatever the chunk happens to carry (Infinity
-            # path) and otherwise emit a zero placeholder so the downstream
-            # shape stays stable. Citation callers refill this via
-            # Dealer.fetch_chunk_vectors when needed.
+            # 主召回不再读取 Chunk 向量。Infinity 路径若已携带向量则直接使用，否则返回等维
+            # 零向量占位，保持下游数据结构稳定；引用链路需要时会通过
+            # Dealer.fetch_chunk_vectors() 补取真实向量。
             # 因此 ES 主链路返回的 vector 通常是等维零向量占位；需要生成引用时，
             # 调用方再通过 fetch_chunk_vectors() 按最终 Chunk ID 精确读取真实向量。
             d = {
@@ -918,11 +901,10 @@ class Dealer:
         sort_by_position: bool = False,
         retrieve_all: bool = False,
     ):
-        """Return chunks for a document.
+        """返回文档的块。
 
-        By default, preserve the historical max_count cap. When retrieve_all is
-        True, keep paging until the doc store returns fewer rows than requested.
-        """
+        默认情况下，保留历史 max_count 上限。当 retrieve_all 为
+        确实，保持分页直到文档存储返回的行数少于请求的行数。"""
         condition = {"doc_id": doc_id}
 
         fields_set = set(fields or [])
@@ -998,7 +980,7 @@ class Dealer:
         return {a.replace(".", "_"): max(1, c) for a, c in tag_fea}
 
     async def retrieval_by_toc(self, query: str, chunks: list[dict], tenant_ids: list[str], chat_mdl, topn: int = 6):
-        from rag.prompts.generator import relevant_chunks_with_toc  # moved from the top of the file to avoid circular import
+        from rag.prompts.generator import relevant_chunks_with_toc  # 从文件顶部移出以避免循环导入
 
         if not chunks:
             return []
@@ -1085,7 +1067,7 @@ class Dealer:
             chunk = self.dataStore.get(id, idx_nms[0], [ck["kb_id"] for ck in cks])
             if chunk is None:
                 logging.warning(
-                    "Parent chunk '%s' not found in the index; falling back to %d child chunk(s).",
+                    "索引中未找到父块 '%s'；回退到 %d 子块。",
                     id,
                     len(cks),
                 )

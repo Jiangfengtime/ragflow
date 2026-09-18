@@ -515,7 +515,7 @@ API_PROXY_SCHEME='python'
 确认任务执行器正在运行，并检查：
 
 ```text
-logs/task_executor_common_mac_local_0.log
+logs/local/task_executor.log
 ```
 
 API 服务本身不会代替 task executor 消费文档解析任务。

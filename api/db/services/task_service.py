@@ -38,7 +38,7 @@ from rag.nlp import search
 
 CANVAS_DEBUG_DOC_ID = "dataflow_x"
 GRAPH_RAPTOR_FAKE_DOC_ID = "graph_raptor_x"
-TASK_MAX_LOG_LENGTH = int(os.environ.get("TASK_MAX_LOG_LENGTH", 3000))  # TEXT MAX is 64 KiB bytes!
+TASK_MAX_LOG_LENGTH = int(os.environ.get("TASK_MAX_LOG_LENGTH", 3000))  # TEXT MAX 是 64 KiB 字节！
 DOC_CHUNKING_COUNTER_TTL_SECONDS = 7 * 24 * 3600
 
 
@@ -65,7 +65,7 @@ def seed_doc_chunking_counter(doc_id: str, pending_count: int) -> bool:
             exp=DOC_CHUNKING_COUNTER_TTL_SECONDS,
         )
     except Exception:
-        logging.exception("Failed to seed chunking counter for doc %s", doc_id)
+        logging.exception("无法为文档 %s 播种分块计数器", doc_id)
         return False
 
 
@@ -75,7 +75,8 @@ def clear_doc_chunking_counter(doc_id: str) -> None:
     try:
         REDIS_CONN.delete(_doc_chunking_pending_key(doc_id))
     except Exception:
-        logging.exception("Failed to clear chunking counter for doc %s", doc_id)
+        logging.exception("无法清除文档 %s 的分块计数器", doc_id)
+
 
 # todo 这个方法的功能
 def abort_doc_chunking_counter(doc_id: str) -> None:
@@ -89,7 +90,7 @@ def abort_doc_chunking_counter(doc_id: str) -> None:
             exp=DOC_CHUNKING_COUNTER_TTL_SECONDS,
         )
     except Exception:
-        logging.exception("Failed to abort chunking counter for doc %s", doc_id)
+        logging.exception("无法中止文档 %s 的分块计数器", doc_id)
 
 
 def is_doc_chunking_aborted(doc_id: str) -> bool:
@@ -98,17 +99,16 @@ def is_doc_chunking_aborted(doc_id: str) -> bool:
     try:
         return bool(REDIS_CONN.get(_doc_chunking_aborted_key(doc_id)))
     except Exception:
-        logging.exception("Failed to read chunking abort marker for doc %s", doc_id)
+        logging.exception("无法读取文档 %s 的分块中止标记", doc_id)
         return False
 
 
 def credit_doc_chunking_task(doc_id: str, task_id: str) -> int | None:
-    """Credit one completed standard chunking task.
+    """完成一项标准分块任务。
 
-    Returns the post-decrement pending count when this task was credited for
-    the first time. Returns a positive value when this task was already
-    credited, so callers treat retries as not-last.
-    """
+    返回此任务记入时的递减后挂起计数
+    第一次。当该任务已经完成时返回正值
+    已记入，因此调用者将重试视为非最后重试。"""
     if not doc_id or not task_id:
         return None
     try:
@@ -124,17 +124,17 @@ def credit_doc_chunking_task(doc_id: str, task_id: str) -> int | None:
             return -1
         return REDIS_CONN.decrby(pending_key, 1)
     except Exception:
-        logging.exception("Failed to credit chunking task %s for doc %s", task_id, doc_id)
+        logging.exception("无法为文档 %s 分配分块任务 %s", task_id, doc_id)
         return None
 
 
 def trim_header_by_lines(text: str, max_length) -> str:
-    # Trim header text to maximum length while preserving line breaks
-    # Args:
-    #     text: Input text to trim
-    #     max_length: Maximum allowed length
-    # Returns:
-    #     Trimmed text
+    # 将标题文本修剪到最大长度，同时保留换行符
+    # 参数：
+    # text：输入要修剪的文本
+    # max_length：最大允许长度
+    # 返回：
+    # 修剪后的文本
     len_text = len(text)
     if len_text <= max_length:
         return text
@@ -145,38 +145,36 @@ def trim_header_by_lines(text: str, max_length) -> str:
 
 
 class TaskService(CommonService):
-    """Service class for managing document processing tasks.
+    """Service 用于管理文档处理任务的类。
 
-    This class extends CommonService to provide specialized functionality for document
-    processing task management, including task creation, progress tracking, and chunk
-    management. It handles various document types (PDF, Excel, etc.) and manages their
-    processing lifecycle.
+    该类扩展了CommonService，为文档提供专门的功能
+    处理任务管理，包括任务创建、进度跟踪和块
+    管理。它处理各种文档类型（PDF、Excel 等）并管理它们的
+    处理生命周期。
 
-    The class implements a robust task queue system with retry mechanisms and progress
-    tracking, supporting both synchronous and asynchronous task execution.
+    该类实现了一个具有重试机制和进度的健壮任务队列系统
+    跟踪，支持同步和异步任务执行。
 
-    Attributes:
-        model: The Task model class for database operations.
-    """
+    属性：
+        model：数据库操作的Task模型类。"""
 
     model = Task
 
     @classmethod
     @DB.connection_context()
     def get_task(cls, task_id, doc_ids=[]):
-        """Retrieve detailed task information by task ID.
+        """通过任务 ID 检索详细任务信息。
 
-        This method fetches comprehensive task details including associated document,
-        dataset, and tenant information. It also handles task retry logic and
-        progress updates.
+        该方法获取全面的任务详细信息，包括相关文档、
+        数据集和租户信息。它还处理任务重试逻辑和
+        进度更新。
 
-        Args:
-            task_id (str): The unique identifier of the task to retrieve.
+        参数：
+            task_id (str)：要检索的任务的唯一标识符。
 
-        Returns:
-            dict: Task details dictionary containing all task information and related metadata.
-                 Returns None if task is not found or has exceeded retry limit.
-        """
+        返回：
+            字典：Task 详细字典包含所有任务信息和相关元数据。
+                 如果未找到任务或已超出重试限制，则返回 None。"""
         doc_id = cls.model.doc_id
         if doc_id == CANVAS_DEBUG_DOC_ID and doc_ids:
             doc_id = doc_ids[0]
@@ -241,18 +239,17 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_tasks(cls, doc_id: str):
-        """Retrieve all tasks associated with a document.
+        """检索与文档关联的所有任务。
 
-        This method fetches all processing tasks for a given document, ordered by page
-        number and creation time. It includes task progress and chunk information.
+        此方法获取给定文档的所有处理任务，按页面排序
+        数量和创建时间。它包括任务进度和块信息。
 
-        Args:
-            doc_id (str): The unique identifier of the document.
+        参数：
+            doc_id (str)：文档的唯一标识符。
 
-        Returns:
-            list[dict]: List of task dictionaries containing task details.
-                       Returns None if no tasks are found.
-        """
+        返回：
+            list[dict]：包含任务详细信息的任务字典列表。
+                       如果未找到任务，则返回 None。"""
         fields = [
             cls.model.id,
             cls.model.from_page,
@@ -269,18 +266,17 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def get_tasks_progress_by_doc_ids(cls, doc_ids: list[str]):
-        """Retrieve all tasks associated with specific documents.
+        """检索与特定文档关联的所有任务。
 
-        This method fetches all processing tasks for given document ids, ordered by
-        creation time. It includes task progress and chunk information.
+        此方法获取给定文档 ID 的所有处理任务，按顺序排列
+        创建时间。它包括任务进度和块信息。
 
-        Args:
-            doc_ids (str): The unique identifier of the document.
+        参数：
+            doc_ids (str)：文档的唯一标识符。
 
-        Returns:
-            list[dict]: List of task dictionaries containing task details.
-                       Returns None if no tasks are found.
-        """
+        返回：
+            list[dict]：包含任务详细信息的任务字典列表。
+                       如果未找到任务，则返回 None。"""
         fields = [cls.model.id, cls.model.doc_id, cls.model.from_page, cls.model.progress, cls.model.progress_msg, cls.model.digest, cls.model.chunk_ids, cls.model.create_time]
         tasks = cls.model.select(*fields).order_by(cls.model.create_time.desc()).where(cls.model.doc_id.in_(doc_ids))
         tasks = list(tasks.dicts())
@@ -291,31 +287,29 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def update_chunk_ids(cls, id: str, chunk_ids: str):
-        """Update the chunk IDs associated with a task.
+        """更新与任务关联的块 IDs。
 
-        This method updates the chunk_ids field of a task, which stores the IDs of
-        processed document chunks in a space-separated string format.
+        该方法更新任务的chunk_ids字段，该字段存储了任务的IDs
+        以空格分隔的字符串格式处理文档块。
 
-        Args:
-            id (str): The unique identifier of the task.
-            chunk_ids (str): Space-separated string of chunk identifiers.
-        """
+        参数：
+            id (str)：任务的唯一标识符。
+            chunk_ids (str)：以空格分隔的块标识符字符串。"""
         cls.model.update(chunk_ids=chunk_ids).where(cls.model.id == id).execute()
 
     @classmethod
     @DB.connection_context()
     def get_ongoing_doc_name(cls):
-        """Get names of documents that are currently being processed.
+        """获取当前正在处理的文档的名称。
 
-        This method retrieves information about documents that are in the processing state,
-        including their locations and associated IDs. It uses database locking to ensure
-        thread safety when accessing the task information.
+        此方法检索有关处于处理状态的文档的信息，
+        包括它们的位置和相关的 IDs。它使用数据库锁定来确保
+        访问任务信息时的线程安全。
 
-        Returns:
-            list[tuple]: A list of tuples, each containing (parent_id/kb_id, location)
-                        for documents currently being processed. Returns empty list if
-                        no documents are being processed.
-        """
+        返回：
+            list[tuple]：元组列表，每个元组包含（parent_id/kb_id，位置）
+                        用于当前正在处理的文档。如果返回空列表
+                        没有文件正在处理。"""
         with DB.lock("get_task", -1):
             docs = (
                 cls.model.select(*[Document.id, Document.kb_id, Document.location, File.parent_id])
@@ -357,18 +351,17 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def do_cancel(cls, id):
-        """Check if a task should be cancelled based on its document status.
+        """根据任务的文档状态检查是否应取消任务。
 
-        This method determines whether a task should be cancelled by checking the
-        associated document's run status and progress. A task should be cancelled
-        if its document is marked for cancellation or has negative progress.
+        此方法通过检查任务来确定是否应取消任务
+        关联文档的运行状态和进度。任务应该被取消
+        如果其文档被标记为取消或有负面进展。
 
-        Args:
-            id (str): The unique identifier of the task to check.
+        参数：
+            id (str)：要检查的任务的唯一标识符。
 
-        Returns:
-            bool: True if the task should be cancelled, False otherwise.
-        """
+        返回：
+            bool：如果应取消任务则为 True，否则为 False。"""
         task = cls.model.get_by_id(id)
         _, doc = DocumentService.get_by_id(task.doc_id)
         return doc.run == TaskStatus.CANCEL.value or doc.progress < 0
@@ -376,30 +369,29 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def update_progress(cls, id, info):
-        """Update the progress information for a task.
+        """更新任务的进度信息。
 
-        This method updates both the progress message and completion percentage of a task.
-        It handles platform-specific behavior (macOS vs others) and uses database locking
-        when necessary to ensure thread safety.
+        此方法会更新任务的进度消息和完成百分比。
+        它处理特定于平台的行为（macOS 与其他平台）并使用数据库锁定
+        必要时保证线程安全。
 
-        Update Rules:
-            - progress_msg: Always appends the new message to the existing one, and trims the result to max 3000 lines.
-            - progress: Updates when (a) new progress >= 1 (allows recovery from -1), or
-                        (b) current progress != -1 AND (new progress is -1 OR greater than existing).
+        更新规则：
+            - progress_msg：始终将新消息附加到现有消息，并将结果修剪为最多 3000 行。
+            - 进度：当 (a) 新进度 >= 1（允许从 -1 恢复）时更新，或者
+                        (b) 当前进度 != -1 AND （新进度比现有进度大 -1 OR）。
 
-        Args:
-            id (str): The unique identifier of the task to update.
-            info (dict): Dictionary containing progress information with keys:
-                        - progress_msg (str, optional): Progress message to append
-                        - progress (float, optional): Progress percentage (0.0 to 1.0)
-        """
+        参数：
+            id (str)：要更新的任务的唯一标识符。
+            info (dict)：包含进度信息的字典，其键为：
+                        - progress_msg（str，可选）：要附加的进度消息
+                        - 进度（float，可选）：进度百分比（0.0 到 1.0）"""
         try:
             task = cls.model.get_by_id(id)
         except cls.model.DoesNotExist:
-            logging.info("Skip progress update for deleted task %s", id)
+            logging.info("跳过已删除任务的进度更新 %s", id)
             return
         if not task:
-            logging.warning("Update_progress error: task not found")
+            logging.warning("Update_progress 错误：找不到任务")
             return
 
         if os.environ.get("MACOS"):
@@ -433,30 +425,29 @@ class TaskService(CommonService):
     @classmethod
     @DB.connection_context()
     def delete_by_doc_ids(cls, doc_ids):
-        """Delete task associated with a document."""
+        """删除与文档关联的任务。"""
         return cls.model.delete().where(cls.model.doc_id.in_(doc_ids)).execute()
 
 
 def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
-    """Create and queue document processing tasks.
+    """创建文档处理任务并对其进行排队。
 
-    This function creates processing tasks for a document based on its type and configuration.
-    It handles different document types (PDF, Excel, etc.) differently and manages task
-    chunking and configuration. It also implements task reuse optimization by checking
-    for previously completed tasks.
+    此函数根据文档的类型和配置创建文档的处理任务。
+    它以不同的方式处理不同的文档类型（PDF、Excel等）并管理任务
+    分块和配置。它还通过检查来实现任务重用优化
+    对于之前完成的任务。
 
-    Args:
-        doc (dict): Document dictionary containing metadata and configuration.
-        bucket (str): Storage bucket name where the document is stored.
-        name (str): File name of the document.
-        priority (int, optional): Priority level for task queueing (default is 0).
+    参数：
+        doc (dict)：Document 字典，包含元数据和配置。
+        Bucket (str)：存储文档的存储桶名称。
+        name (str): File 文档的名称。
+        priority（int，可选）：任务排队的优先级（默认为0）。
 
-    Note:
-        - For PDF documents, tasks are created per page range based on configuration
-        - For Excel documents, tasks are created per row range
-        - Task digests are calculated for optimization and reuse
-        - Previous task chunks may be reused if available
-    """
+    注意：
+        - 对于 PDF 文档，根据配置在每个页面范围创建任务
+        - 对于 Excel 文档，任务是按行范围创建的
+        - 计算 Task 摘要以进行优化和重用
+        - 以前的任务块如果可用的话可以重用"""
 
     # 【链路二：创建并投递解析 Task】
     # 一个 document 不一定只对应一个 Task：PDF 通常按页范围拆分，表格按行范围拆分。
@@ -487,9 +478,9 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         if doc["parser_id"] == "paper":
             page_size = doc["parser_config"].get("task_page_size") or 22
 
-        # Splitting MinerU parsing into page-based tasks would repeatedly upload the entire PDF to the MinerU API server, increasing network bandwidth usage without improving parsing speed. The MinerU API server would also store duplicate copies of these files, wasting disk space.
+        # 将 MinerU 解析拆分为基于页面的任务会重复将整个 PDF 上传到 MinerU API 服务器，增加网络带宽使用量，但不会提高解析速度。 MinerU API 服务器还会存储这些文件的重复副本，从而浪费磁盘空间。
         is_mineru = False
-        layout_recognizer = doc["parser_config"].get("layout_recognize", "") # 'DeepDOC'
+        layout_recognizer = doc["parser_config"].get("layout_recognize", "")  # 'DeepDOC'
         # 如果 layout_recognizer 是一个 32 位字符串，就暂时认为它可能是 tenant_model 表中的模型 ID。
         if isinstance(layout_recognizer, str) and len(layout_recognizer) == 32:
             try:
@@ -500,7 +491,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
             except LookupError:
                 pass
         if is_mineru:
-            logging.info("Document %s selected MinerU unsplit-task mode with page size %s", doc["id"], MAXIMUM_TASK_PAGE_NUMBER)
+            logging.info("Document %s 选择了 MinerU 不分割任务模式，页面大小为 %s", doc["id"], MAXIMUM_TASK_PAGE_NUMBER)
         # 如果是mineru, 则不拆分
         if doc["parser_id"] in ["one", "knowledge_graph"] or doc["parser_config"].get("toc_extraction", False) or is_mineru:
             page_size = MAXIMUM_TASK_PAGE_NUMBER
@@ -530,7 +521,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     else:
         parse_task_array.append(new_task())
 
-    # Determine suffix based on parser_id (consistent with SAAS version line 444)
+    # 根据parser_id确定后缀（与SAAS版本第444行一致）
     suffix = "common" if doc["parser_id"] != "resume" else "resume"
 
     # digest 由解析配置、doc_id 和页范围共同决定，用来判断重新解析时能否复用旧 Task 的 Chunk。
@@ -579,7 +570,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         # 只有最后一个 Task 才负责执行文档级收尾流程。
         assert seed_doc_chunking_counter(doc["id"], chunking_n), "Can't access Redis. Please check the Redis' status."
     logging.info(
-        "document_tasks_created doc_id=%s kb_id=%s parser_id=%s task_total=%d task_pending=%d priority=%s queue_suffix=%s",
+        "文档任务已创建 文档ID=%s 知识库ID=%s 解析器ID=%s 任务总数=%d 待处理数=%d 优先级=%s 队列后缀=%s",
         doc["id"],
         doc.get("kb_id"),
         doc.get("parser_id"),
@@ -593,7 +584,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
             # XADD 到 Redis Stream。投递成功不代表解析完成，只代表任务可以被消费者组领取。
             assert REDIS_CONN.queue_product(settings.get_svr_queue_name(priority, suffix), message=unfinished_task), "Can't access Redis. Please check the Redis' status."
         logging.info(
-            "document_tasks_enqueued doc_id=%s queue=%s task_ids=%s",
+            "文档任务已进入队列 文档ID=%s 队列=%s 任务ID列表=%s",
             doc["id"],
             settings.get_svr_queue_name(priority, suffix),
             [task["id"] for task in unfinished_task_array],
@@ -604,26 +595,25 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
 
 
 def reuse_prev_task_chunks(task: dict, prev_tasks: list[dict], chunking_config: dict):
-    """Attempt to reuse chunks from previous tasks for optimization.
+    """尝试重用以前任务中的块以进行优化。
 
-    This function checks if chunks from previously completed tasks can be reused for
-    the current task, which can significantly improve processing efficiency. It matches
-    tasks based on page ranges and configuration digests.
+    此函数检查之前完成的任务中的块是否可以重用
+    当前任务，可以显着提高处理效率。它匹配
+    基于页面范围和配置摘要的任务。
 
-    Args:
-        task (dict): Current task dictionary to potentially reuse chunks for.
-        prev_tasks (list[dict]): List of previous task dictionaries to check for reuse.
-        chunking_config (dict): Configuration dictionary for chunk processing.
+    参数：
+        任务 (dict)：可能重用块的当前任务字典。
+        prev_tasks (list[dict])：要检查重用的先前任务字典列表。
+        chunking_config (dict)：用于块处理的配置字典。
 
-    Returns:
-        int: Number of chunks successfully reused. Returns 0 if no chunks could be reused.
+    返回：
+        int：成功重用的块数。如果没有可以重用的块，则返回 0。
 
-    Note:
-        Chunks can only be reused if:
-        - A previous task exists with matching page range and configuration digest
-        - The previous task was completed successfully (progress = 1.0)
-        - The previous task has valid chunk IDs
-    """
+    注意：
+        仅在以下情况下才可以重复使用块：
+        - 先前的任务存在且具有匹配的页面范围和配置摘要
+        - 上一个任务已成功完成（进度= 1.0）
+        - 上一个任务具有有效块 IDs"""
     idx = 0
     while idx < len(prev_tasks):
         prev_task = prev_tasks[idx]
@@ -668,7 +658,6 @@ def has_canceled(task_id):
 
 
 def queue_dataflow(tenant_id: str, flow_id: str, task_id: str, doc_id: str = CANVAS_DEBUG_DOC_ID, file: dict = None, priority: int = 0, rerun: bool = False) -> tuple[bool, str]:
-
     task = dict(
         id=task_id,
         doc_id=doc_id,

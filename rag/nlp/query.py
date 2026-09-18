@@ -40,6 +40,7 @@ class FulltextQueryer(QueryBase):
             "content_ltks^2",
             "content_sm_ltks",
         ]
+
     # RAGFlow 构造全文查询:
     # 1. 文本标准化：繁体转简体、全角转半角、转小写、删除特殊符号,
     # 2. 使用 rag_tokenizer 分词。
@@ -51,11 +52,11 @@ class FulltextQueryer(QueryBase):
         original_query = txt
         txt = self.add_space_between_eng_zh(txt)
 
-        # Strip Infinity ESCAPABLE characters from the query.
+        # 从查询中去除 Infinity ESCAPABLE 字符。
         #
-        # Infinity's search_lexer.l defines ESCAPABLE characters [\x20()^"'~*?:\\]
-        # If these characters appear unescaped in a query, Infinity's lexer will
-        # interpret them as special tokens, causing parsing errors.
+        # Infinity 的 search_lexer.l 定义了 ESCAPABLE 字符 [\x20()^"'~*?:\\]
+        # 如果这些字符在查询中未转义，Infinity 的词法分析器将
+        # 将它们解释为特殊标记，导致解析错误。
         txt = re.sub(
             r"[ :|\r\n\t,，。？?/`!！&^%%()\[\]{}<>*~'\"\\]+",
             " ",
@@ -77,8 +78,8 @@ class FulltextQueryer(QueryBase):
             tks_w = [(tk.strip(), w) for tk, w in tks_w if tk.strip()]
             syns = []
             for tk, w in tks_w[:256]:
-                # Strip single quotes from synonym terms to avoid Infinity lexer TokenError
-                # (e.g. WordNet returns "cat-o'-nine-tails" for "cat")
+                # 从同义词术语中删除单引号以避免 Infinity 词法分析器 TokenError
+                # （e.g。WordNet 对于“cat”返回“cat-o'-nine-tails”）
                 syn = [rag_tokenizer.tokenize(s).replace("'", "") for s in self.syn.lookup(tk)]
                 keywords.extend(syn)
                 syn = ['"{}"^{:.4f}'.format(s, w / 4.0) for s in syn if s.strip()]

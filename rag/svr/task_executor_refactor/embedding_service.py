@@ -13,11 +13,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""
-Embedding Service Module.
+"""Embedding Service 模块。
 
-Provides [`EmbeddingService`](rag/svr/task_executor_refactor/embedding_service.py:42) for vector embedding operations.
-"""
+提供 [`EmbeddingService`](rag/svr/task_executor_refactor/embedding_service.py:42) 用于向量嵌入操作。"""
 
 from typing import Any, Dict, List, Tuple
 
@@ -30,27 +28,25 @@ from rag.svr.task_executor_refactor.task_context import TaskContext
 
 
 class EmbeddingService:
-    """Service for vector embedding operations.
+    """Service 用于向量嵌入操作。
 
-    This service handles:
-    - Batch encoding of text chunks
-    - Title + content vector combination
-    - Embedding model rate limiting
+    该服务处理：
+    - 文本块的批量编码
+    - 标题+内容向量组合
+    - Embedding模型速率限制
 
-    All intermediate results are recorded via RecordingContext for comparison.
-    """
+    所有中间结果均通过RecordingContext记录以供比较。"""
 
     def __init__(
         self,
         ctx: TaskContext,
         embedding_batch_size: int = None,
     ):
-        """Initialize EmbeddingService.
+        """初始化EmbeddingService。
 
-        Args:
-            ctx: TaskContext containing task configuration and execution resources.
-            embedding_batch_size: Batch size for embedding operations.
-        """
+        参数：
+            ctx: TaskContext 包含任务配置和执行资源。
+            embedding_batch_size：嵌入操作的批量大小。"""
         self._task_context = ctx
 
         self._embedding_batch_size = embedding_batch_size or settings.EMBEDDING_BATCH_SIZE
@@ -61,16 +57,15 @@ class EmbeddingService:
         embedding_model,
         parser_config: Dict = None,
     ) -> Tuple[int, int]:
-        """Embed a list of chunks.
+        """嵌入块列表。
 
-        Args:
-            docs: List of chunk dictionaries to embed.
-            embedding_model: The embedding model bundle (LLMBundle).
-            parser_config: Parser configuration for filename embedding weight.
+        参数：
+            docs：要嵌入的块字典列表。
+            embedding_model：嵌入模型包（LLMBundle）。
+            parser_config：文件名嵌入权重的解析器配置。
 
-        Returns:
-            Tuple of (token_count, vector_size).
-        """
+        返回：
+            (token_count、vector_size) 的元组。"""
         if parser_config is None:
             parser_config = {}
 
@@ -105,12 +100,12 @@ class EmbeddingService:
             if self._task_context.progress_cb:
                 self._task_context.progress_cb(prog=0.7 + 0.2 * (i + 1) / len(contents), msg="")
 
-        # Stack vectors using EmbeddingUtils
+        # 使用 EmbeddingUtils 的堆栈向量
         cnts = EmbeddingUtils.stack_vectors(vects_batches)
 
         # 最终每个 Chunk 的向量是“文件名向量”和“正文向量”的加权组合，不是简单拼接；
         # filename_embd_weight 越大，查询命中文件名语义时该文档越容易被向量召回。
-        # Combine title and content vectors using EmbeddingUtils
+        # 使用 EmbeddingUtils 组合标题和内容向量
         title_weight = parser_config.get("filename_embd_weight", EmbeddingUtils.DEFAULT_TITLE_WEIGHT)
         vects = EmbeddingUtils.combine_title_content_vectors(tts, cnts, title_weight)
 
@@ -126,5 +121,5 @@ class EmbeddingService:
 
     @staticmethod
     def _batch_encode_wrapper(txts: List[str], embedding_model) -> Tuple[np.ndarray, int]:
-        """Synchronous wrapper for batch encoding — used with thread_pool_exec."""
+        """用于批量编码的同步包装器 - 与 thread_pool_exec 一起使用。"""
         return embedding_model.encode(txts)

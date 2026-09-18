@@ -61,23 +61,22 @@ from rag.prompts.template import load_prompt
 
 
 def _sanitize_json_floats(obj):
-    """Replace NaN/Infinity floats with None so the result is RFC 8259 JSON.
+    """将 NaN/Infinity 浮点数替换为 None，因此结果为 RFC 8259 JSON。
 
-    `json.dumps` emits the literal tokens `NaN`/`Infinity` by default
-    (allow_nan=True). Those tokens are valid Python JSON output but invalid
-    per the JSON spec, and downstream proxies / Go consumers reject the
-    response with `failed to encode response: json: unsupported value: NaN`
-    (fixes #15245). Retrieval scores (similarity, vector_similarity,
-    term_similarity) can become NaN when an aggregation runs over an empty
-    set or when a similarity denominator is zero, so the chat completions
-    stream is the realistic trigger.
+    `json.dumps` 默认发出文字标记 `NaN`/`Infinity`
+    （allow_nan=真）。这些令牌是有效的 Python JSON 输出但无效
+    根据 JSON 规范，下游代理/Go 消费者拒绝
+    响应 `failed to encode response: json: unsupported value: NaN`
+    （修复#15245）。检索分数（相似度，vector_similarity，
+    当聚合运行在空的
+    设置或当相似性分母为零时，因此聊天完成
+    流是现实的触发器。
 
-    `isinstance(obj, float)` alone catches Python float and numpy.float64
-    (a float subclass) but misses numpy.float32 / numpy.float16 and any
-    other duck-typed numeric. Probe via math.isnan/isinf in a try/except
-    so any object math can evaluate gets sanitized — without changing
-    upstream callers like chunks_format or rag/nlp/search.py.
-    """
+    `isinstance(obj, float)`单独捕获Python浮子和numpy.float64
+    （浮动子类）但错过了 numpy.float32 / numpy.float16 和任何
+    其他鸭子类型的数字。通过 math.isnan/isinf 在 try/except 中进行探测
+    因此任何可以计算的数学对象都会被清理——无需改变
+    上游调用者如 chunks_format 或 rag/nlp/search.py."""
     try:
         if math.isnan(obj) or math.isinf(obj):
             return None
@@ -291,7 +290,7 @@ def _normalize_completion_messages(req):
     if not msg[-1].get("id"):
         msg[-1]["id"] = get_uuid()
 
-    # till now, message and msg are sharing the same copy
+    # 到目前为止，message 和 msg 共享同一个副本
     return (messages, msg), None
 
 
@@ -303,7 +302,7 @@ def _llm_model_type(llm_setting):
 
 
 async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type):
-    """Validate and synchronize a model name with its tenant-model ID."""
+    """验证模型名称并将其与其租户模型 ID 同步。"""
     if name_field not in req and id_field not in req:
         return None
 
@@ -320,7 +319,7 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
         try:
             await thread_pool_exec(get_model_config_by_id, tenant_id, model_type, model_id)
         except LookupError as e:
-            logging.error("Fail to get %s config by tenant model id %s: %s", model_type, model_id, e)
+            logging.error("无法通过租户模型 ID %s 获取 %s 配置：%s", model_type, model_id, e)
             return f"`{id_field}` must be a valid tenant model id"
 
     if model_name:
@@ -329,15 +328,15 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
                 return f"`{name_field}` and `{id_field}` must refer to the same model"
         else:
             try:
-                # A name field may already contain a tenant model ID. Resolve it
-                # strictly first, then fall back to the composite model name.
+                # 名称字段可能已包含租户模型 ID。解决它
+                # 严格首先，然后回退到复合模型名称。
                 try:
                     await thread_pool_exec(get_model_config_by_id, tenant_id, model_type, model_name)
                     resolved_name_id = model_name
                 except LookupError:
                     resolved_name_id = await thread_pool_exec(resolve_model_id, tenant_id, model_type, model_name)
             except LookupError as e:
-                logging.error("Fail to resolve %s %s: %s", name_field, model_name, e)
+                logging.error("无法解析%s %s：%s", name_field, model_name, e)
                 return f"`{name_field}` {model_name} doesn't exist"
 
     if model_id and model_name:
@@ -349,23 +348,14 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
         try:
             req[name_field] = await thread_pool_exec(get_composite_model_name_by_id, model_id)
         except LookupError as e:
-            logging.error("Fail to get composite name for %s %s: %s", id_field, model_id, e)
+            logging.error("无法获取 %s %s 的复合名称：%s", id_field, model_id, e)
             return f"`{id_field}` must be a valid tenant model id"
     else:
-        # Clearing one side must not leave a stale ID/name on the other side.
+        # 清除一侧不得在另一侧留下过时的 ID/名称。
         req[id_field] = None
         req[name_field] = ""
 
     return None
-
-
-# def _validate_prompt_config(prompt_config):
-#     for parameter in prompt_config.get("parameters", []):
-#         if parameter.get("optional"):
-#             continue
-#         if prompt_config.get("system", "").find("{%s}" % parameter["key"]) < 0:
-#             return f"Parameter '{parameter['key']}' is not used"
-#     return None
 
 
 async def _validate_dataset_ids(dataset_ids, tenant_id):
@@ -410,17 +400,18 @@ def _apply_prompt_defaults(req):
 @manager.route("/chats", methods=["POST"])  # noqa: F821
 @login_required
 async def create():
+    """创建长期聊天应用配置；不会同时创建会话或调用模型。"""
     try:
         req = await get_request_json()
         ok, tenant = TenantService.get_by_id(current_user.id)
         if not ok:
             return get_data_error_result(message="Tenant not found!")
 
-        # Validate tenant_id should not be provided
+        # 验证 tenant_id 不应提供
         if req.get("tenant_id"):
             return get_data_error_result(message="`tenant_id` must not be provided")
 
-        # Validate name
+        # 验证姓名
         name, err = _validate_name(req.get("name"), required=True)
         if err:
             return get_data_error_result(message=err)
@@ -451,9 +442,6 @@ async def create():
             err = _validate_prompt_parameters(req["prompt_config"])
             if err:
                 return get_data_error_result(message=err)
-            # err = _validate_prompt_config(req["prompt_config"])
-            # if err:
-            #     return get_data_error_result(message=err)
 
         req.setdefault("kb_ids", [])
         req.setdefault("llm_id", tenant.tenant_llm_id)
@@ -469,9 +457,6 @@ async def create():
         req.setdefault("vector_similarity_weight", 0.3)
         req.setdefault("icon", "")
         _apply_prompt_defaults(req)
-        # err = _validate_prompt_config(req["prompt_config"])
-        # if err:
-        #     return get_data_error_result(message=err)
 
         req = {field: value for field, value in req.items() if field in _PERSISTED_FIELDS}
         for field in _READONLY_FIELDS:
@@ -492,6 +477,14 @@ async def create():
         ok, chat = DialogService.get_by_id(req["id"])
         if not ok:
             return get_data_error_result(message="Failed to retrieve created chat.")
+        logging.info(
+            "聊天应用已创建 租户ID=%s 聊天应用ID=%s 知识库数=%d 大模型ID=%s 是否启用重排=%s",
+            current_user.id,
+            req["id"],
+            len(req.get("kb_ids", [])),
+            req.get("llm_id") or req.get("tenant_llm_id") or "default",
+            bool(req.get("rerank_id") or req.get("tenant_rerank_id")),
+        )
         return get_json_result(data=_build_chat_response(chat))
     except Exception as ex:
         return server_error_response(ex)
@@ -519,8 +512,8 @@ async def list_chats():
         return get_json_result(code=RetCode.ARGUMENT_ERROR, message=str(ex))
 
     try:
-        # Invalid or negative pagination values fall back to defaults
-        # instead of leaking internal conversion/SQL errors.
+        # 无效或负分页值回退到默认值
+        # 而不是泄漏内部 conversion/SQL 错误。
         page_number = validate_rest_api_page(request.args.get("page", DEFAULT_PAGE))
         items_per_page = validate_rest_api_page_size(request.args.get("page_size", DEFAULT_PAGE_SIZE))
 
@@ -634,16 +627,6 @@ async def update_chat(chat_id):
             err = _validate_prompt_parameters(req["prompt_config"])
             if err:
                 return get_data_error_result(message=err)
-            # err = _validate_prompt_config(req["prompt_config"])
-            # if err:
-            #     return get_data_error_result(message=err)
-
-        # prompt_config = req.get("prompt_config", {})
-        # if not prompt_config:
-        #     prompt_config = current_chat.get("prompt_config", {})
-        # kb_ids = req.get("kb_ids", current_chat.get("kb_ids", []))
-        # if not kb_ids and not prompt_config.get("tavily_api_key") and _has_knowledge_placeholder(prompt_config):
-        #     return get_data_error_result(message="Please remove `{knowledge}` in system prompt since no dataset / Tavily used here.")
         req = {field: value for field, value in req.items() if field in _PERSISTED_FIELDS}
         for field in _READONLY_FIELDS:
             req.pop(field, None)
@@ -662,6 +645,15 @@ async def update_chat(chat_id):
         if not DialogService.update_by_id(chat_id, req):
             return get_data_error_result(message="Chat not found!")
 
+        # 这里只更新对话应用配置。已有 Conversation.message/reference
+        # 不会被重写，后续新问题会读取更新后的模型、知识库和检索参数。
+        logging.info(
+            "聊天应用配置已更新 租户ID=%s 聊天应用ID=%s 变更字段=%s 知识库数=%d",
+            current_user.id,
+            chat_id,
+            sorted(req.keys()),
+            len(req.get("kb_ids", current_chat.get("kb_ids", []))),
+        )
         ok, chat = DialogService.get_by_id(chat_id)
         if not ok:
             return get_data_error_result(message="Failed to retrieve updated chat.")
@@ -725,16 +717,6 @@ async def patch_chat(chat_id):
             prompt_config = deepcopy(current_chat.get("prompt_config", {}))
             prompt_config.update(req["prompt_config"])
             req["prompt_config"] = prompt_config
-            # err = _validate_prompt_config(prompt_config)
-            # if err:
-            #     return get_data_error_result(message=err)
-
-        # if "prompt_config" in req or "kb_ids" in req:
-        #     prompt_config = req.get("prompt_config", current_chat.get("prompt_config", {}))
-        #     kb_ids = req.get("kb_ids", current_chat.get("kb_ids", []))
-        #     if not kb_ids and not prompt_config.get("tavily_api_key") and _has_knowledge_placeholder(prompt_config):
-        #         return get_data_error_result(message="Please remove `{knowledge}` in system prompt since no dataset / Tavily used here.")
-
         req = {field: value for field, value in req.items() if field in _PERSISTED_FIELDS}
         for field in _READONLY_FIELDS:
             req.pop(field, None)
@@ -789,7 +771,7 @@ async def bulk_delete_chats():
             if not ids:
                 return get_json_result(data={})
         else:
-            # keep backward compatibility, DELETE with chat_id in request body
+            # 保持向后兼容性，DELETE与请求体中的chat_id
             chat_id = req.get("chat_id")
             if chat_id:
                 try:
@@ -825,7 +807,7 @@ async def bulk_delete_chats():
 @manager.route("/chats/<chat_id>/sessions", methods=["POST"])  # noqa: F821
 @login_required
 async def create_session(chat_id):
-    """Create a new conversation session for the given chat, owned by the authenticated user."""
+    """为聊天应用创建会话，并把开场白作为首条助手消息保存。"""
     if not await _ensure_owned_chat(chat_id):
         return get_json_result(data=False, message="no authorization", code=RetCode.AUTHENTICATION_ERROR)
     try:
@@ -849,6 +831,7 @@ async def create_session(chat_id):
         ok, conv_obj = ConversationService.get_by_id(conv["id"])
         if not ok:
             return get_data_error_result(message="Fail to create a session!")
+        logging.info("聊天会话已创建 租户ID=%s 聊天应用ID=%s 会话ID=%s", current_user.id, chat_id, conv["id"])
         return get_json_result(data=_build_session_response(conv_obj.to_dict()))
     except Exception as ex:
         return server_error_response(ex)
@@ -864,8 +847,8 @@ async def list_sessions(chat_id):
                 message="no authorization",
                 code=RetCode.AUTHENTICATION_ERROR,
             )
-        # Invalid or negative pagination values fall back to defaults
-        # instead of leaking internal conversion/SQL errors.
+        # 无效或负分页值回退到默认值
+        # 而不是泄漏内部 conversion/SQL 错误。
         page_number = validate_rest_api_page(request.args.get("page", DEFAULT_PAGE))
         items_per_page = validate_rest_api_page_size(request.args.get("page_size", DEFAULT_PAGE_SIZE))
         orderby = request.args.get("orderby", "create_time")
@@ -974,7 +957,7 @@ async def delete_sessions(chat_id):
                         try:
                             settings.STORAGE_IMPL.rm(f"{current_user.id}-downloads", file_id)
                         except Exception:
-                            logging.warning("Failed to delete chat upload blob %s/%s", current_user.id, file_id)
+                            logging.warning("无法删除聊天上传 Blob %s/%s", current_user.id, file_id)
             ConversationService.delete_by_id(sid)
             success_count += 1
         all_errors = errors + duplicate_messages
@@ -1069,12 +1052,12 @@ async def update_message_feedback(chat_id, session_id, msg_id):
                             is_positive=thumb_raw is True,
                         )
                         logging.debug(
-                            "Chunk feedback applied: %s succeeded, %s failed",
+                            "Chunk 反馈已应用：%s 成功，%s 失败",
                             feedback_result["success_count"],
                             feedback_result["fail_count"],
                         )
             except Exception as e:
-                logging.warning("Failed to apply chunk feedback: %s", e)
+                logging.warning("无法应用块反馈：%s", e)
 
         await thread_pool_exec(ConversationService.update_by_id, conv_dict["id"], conv_dict)
         return get_json_result(data=_build_session_response(conv_dict))
@@ -1233,8 +1216,14 @@ async def recommendation():
 @manager.route("/chat/completions", methods=["POST"])  # noqa: F821
 @login_required
 async def session_completion(chat_id_in_arg=""):
-    """Handle chat completion requests, streaming or non-streaming, scoped to the authenticated user."""
+    """聊天回答总入口：装载 Dialog/Conversation，执行 RAG，并可选持久化本轮消息。
+
+    ``chat_id`` 为空时使用临时默认 Dialog；有 ``chat_id`` 时必须校验所有权。
+    ``session_id`` 决定继续已有 Conversation 还是创建新会话。SSE 与非流式模式
+    最终都调用 ``rag_agent``，差别只在输出协议和落库时机。
+    """
     req = await get_request_json()
+    request_user_id = current_user.id
     normalized, error = _normalize_completion_messages(req)
     if error:
         return error
@@ -1310,7 +1299,7 @@ async def session_completion(chat_id_in_arg=""):
             dia.tenant_llm_id = None
             dia.llm_setting = chat_model_config
         elif not dia.llm_id:
-            logging.info("empty chat_model_id in req, use default chat model.")
+            logging.info("请求中的 chat_model_id 为空，使用默认聊天模型。")
             _, tenant_info = TenantService.get_by_id(dia.tenant_id)
             if not tenant_info or not tenant_info.llm_id:
                 raise LookupError("No default chat model for tenant.")
@@ -1323,22 +1312,33 @@ async def session_completion(chat_id_in_arg=""):
             default=False,
         )
         stream_mode = req.pop("stream", True)
+        # 不记录消息正文；这些字段足以把 HTTP 请求、检索日志和会话落库关联起来。
+        logging.info(
+            "聊天回答已开始 租户ID=%s 聊天应用ID=%s 会话ID=%s 消息ID=%s 是否流式=%s 历史消息数=%d 是否保存历史=%s 是否传入完整历史=%s",
+            request_user_id,
+            chat_id or "default",
+            session_id or "-",
+            message_id or "-",
+            stream_mode,
+            len(msg),
+            store_history_messages,
+            pass_all_history_messages,
+        )
 
         def _format_answer(ans):
-            """Wrap a raw answer dict with session and chat identifiers."""
+            """为原始回答补充会话和聊天应用标识。"""
             formatted = structure_answer(conv, ans, message_id, session_id)
             if chat_id:
                 formatted["chat_id"] = chat_id
             return formatted
 
         async def stream():
-            """Yield SSE-formatted chunks from the async chat generator."""
+            """把异步聊天生成器输出转换成 SSE 数据块。"""
             nonlocal dia, msg, req, conv
             try:
                 if legacy:
-                    # v0.23.0-style streaming: emit accumulated answer text and
-                    # reconstruct raw <think>...</think> markers from the newer
-                    # start_to_think/end_to_think events.
+                    # 兼容 v0.23.0 的流式格式：持续输出累积回答，并根据新版
+                    # start_to_think/end_to_think 事件还原 <think>...</think> 标记。
                     legacy_answer = ""
                     final_answer = None
                     async for ans in rag_agent(dia, msg, True, session_id=session_id, **req):
@@ -1383,7 +1383,16 @@ async def session_completion(chat_id_in_arg=""):
                         payload = _sanitize_json_floats({"code": 0, "message": "", "data": ans})
                         yield "data:" + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 if conv is not None and store_history_messages:
+                    # rag_agent 会原地补齐助手消息和引用；直到生成结束才整份
+                    # 回写会话，避免把每个令牌都写入 MySQL。
                     await thread_pool_exec(ConversationService.update_by_id, conv.id, conv.to_dict())
+                logging.info(
+                    "聊天回答完成 租户ID=%s 聊天应用ID=%s 会话ID=%s 是否流式=是 是否已持久化=%s",
+                    request_user_id,
+                    chat_id or "default",
+                    session_id or "-",
+                    bool(conv is not None and store_history_messages),
+                )
             except Exception as ex:
                 logging.exception(ex)
                 yield "data:" + json.dumps({"code": 500, "message": str(ex), "data": {"answer": "**ERROR**: " + str(ex), "reference": []}}, ensure_ascii=False) + "\n\n"
@@ -1403,6 +1412,13 @@ async def session_completion(chat_id_in_arg=""):
             if conv is not None and store_history_messages:
                 await thread_pool_exec(ConversationService.update_by_id, conv.id, conv.to_dict())
             break
+        logging.info(
+            "聊天回答完成 租户ID=%s 聊天应用ID=%s 会话ID=%s 是否流式=否 是否已持久化=%s",
+            request_user_id,
+            chat_id or "default",
+            session_id or "-",
+            bool(conv is not None and store_history_messages),
+        )
         return get_json_result(data=_sanitize_json_floats(answer))
     except Exception as ex:
         return server_error_response(ex)

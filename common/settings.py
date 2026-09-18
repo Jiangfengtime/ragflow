@@ -73,10 +73,11 @@ SECRET_KEY = None
 FACTORY_LLM_INFOS = None
 ALLOWED_LLM_FACTORIES = None
 
-# The metadata database and DocEngine/Memory Store may all use GaussDB while
-# targeting different databases, schemas, compatibility modes, or credentials.
-# The metadata database therefore reads only GAUSSDB_METADATA_*. The gaussdb
-# section in service_conf.yaml remains exclusive to DOC_ENGINE=gaussdb.
+# 元数据数据库和 DocEngine/Memory Store 都可能使用 GaussDB，而
+# 针对不同的数据库、模式、兼容模式或凭据。
+# 因此，元数据数据库仅读取 GAUSSDB_METADATA_*。高斯数据库
+# service_conf.yaml 中的
+# 部分仍然是 DOC_ENGINE=gaussdb 专有的。
 GAUSSDB_ENV_DEFAULTS = {
     "name": "rag_flow",
     "user": "rag_flow",
@@ -92,8 +93,8 @@ _GAUSSDB_SCHEMA_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def normalize_database_type(database_type: str | None = None) -> str:
-    # Only normalize the new GaussDB values. Existing database names retain
-    # their upstream spelling and lookup behavior.
+    # 仅标准化新的 GaussDB 值。现有数据库名称保留
+    # 它们的上游拼写和查找行为。
     raw_value = database_type or "mysql"
     normalized = raw_value.strip().lower()
     if normalized in {"gaussdb", "gauss"}:
@@ -109,9 +110,9 @@ def _get_int_env(name: str, default: int) -> int:
 
 
 def _normalize_gaussdb_metadata_schema(value: str | None = None) -> str:
-    # The schema is interpolated into search_path in the libpq options. Restrict
-    # it to a plain SQL identifier so quotes, semicolons, or extra options cannot
-    # be injected. The metadata database currently accepts one schema only.
+    # 该模式被插入到 libpq 选项中的 search_path 中。限制
+    # 将其转换为普通的 SQL 标识符，因此引号、分号或额外选项不能
+    # 被注入。元数据数据库当前仅接受一种模式。
     schema = (value or GAUSSDB_ENV_DEFAULTS["schema"]).strip() or GAUSSDB_ENV_DEFAULTS["schema"]
     if not _GAUSSDB_SCHEMA_PATTERN.match(schema):
         raise ValueError(f"invalid GAUSSDB_METADATA_SCHEMA: {schema}")
@@ -121,16 +122,16 @@ def _normalize_gaussdb_metadata_schema(value: str | None = None) -> str:
 def _gaussdb_metadata_options(schema: str) -> str:
     explicit_options = os.environ.get("GAUSSDB_METADATA_OPTIONS")
     if explicit_options is not None:
-        # An explicit value replaces the complete options string. Advanced
-        # deployments can control search_path, encoding, read-only behavior,
-        # and other libpq options, but must also include any required defaults.
+        # 显式值替换完整的选项字符串。高级
+        # 部署可以控制search_path、编码、只读行为、
+        # 和其他 libpq 选项，但还必须包含任何所需的默认值。
         return explicit_options
     return f"-c search_path={schema} {GAUSSDB_ENV_DEFAULTS['options']}"
 
 
 def _gaussdb_env_config() -> dict:
-    # Read only GAUSSDB_METADATA_* so the metadata database does not share
-    # connection parameters with DOC_ENGINE=gaussdb.
+    # 只读 GAUSSDB_METADATA_* 因此元数据数据库不共享
+    # 连接参数为DOC_ENGINE=gaussdb。
     schema = _normalize_gaussdb_metadata_schema(os.environ.get("GAUSSDB_METADATA_SCHEMA"))
     return {
         "name": os.environ.get("GAUSSDB_METADATA_DBNAME", GAUSSDB_ENV_DEFAULTS["name"]),
@@ -147,8 +148,8 @@ def _gaussdb_env_config() -> dict:
 def load_database_config(database_type: str) -> dict:
     database_type = normalize_database_type(database_type)
     if database_type == "gaussdb":
-        # Always build DB_TYPE=gaussdb from GAUSSDB_METADATA_* so the metadata
-        # connection remains isolated from the gaussdb section used by
+        # 始终从 GAUSSDB_METADATA_* 构建 DB_TYPE=gaussdb，因此元数据
+        # 连接与使用的 gaussdb 部分保持隔离
         # DOC_ENGINE=gaussdb.
         return decrypt_database_config(database=_gaussdb_env_config())
     return decrypt_database_config(name=database_type)
@@ -157,10 +158,10 @@ def load_database_config(database_type: str) -> dict:
 DATABASE_TYPE = normalize_database_type(os.getenv("DB_TYPE", "mysql"))
 DATABASE = load_database_config(DATABASE_TYPE)
 
-# authentication
+# 认证
 AUTHENTICATION_CONF = None
 
-# client
+# 客户端
 CLIENT_AUTHENTICATION = None
 HTTP_APP_KEY = None
 GITHUB_OAUTH = None
@@ -179,13 +180,13 @@ msgStoreConn = None
 retriever = None
 kg_retriever = None
 
-# user registration switch
+# 用户注册开关
 REGISTER_ENABLED = 1
 
-# SSO-only mode: hide password login form
+# SSO-only模式：隐藏密码登录表单
 DISABLE_PASSWORD_LOGIN = False
 
-# sandbox-executor-manager
+# 沙箱执行器管理器
 SANDBOX_HOST = None
 STRONG_TEST_COUNT = int(os.environ.get("STRONG_TEST_COUNT", "8"))
 
@@ -199,7 +200,7 @@ MAIL_PASSWORD = ""
 MAIL_DEFAULT_SENDER = ()
 MAIL_FRONTEND_URL = ""
 
-# move from rag.settings
+# 从 rag.settings 迁移
 ES = {}
 INFINITY = {}
 AZURE = {}
@@ -225,28 +226,25 @@ STORAGE_IMPL = None
 
 
 def get_svr_queue_name(priority: int, suffix: str = "common") -> str:
-    """
-    Generate queue name with two dimensions: priority and suffix.
+    '''生成具有两个维度的队列名称：优先级和后缀。
 
-    Args:
-        priority: Task priority (0=low, 1=high)
-        suffix: Task type suffix (common/resume/graphrag/raptor/mindmap)
-               Currently only "common" is used, other suffixes are reserved.
+    参数：
+        优先级：Task优先级（0=低，1=高）
+        后缀：Task 类型后缀（common/resume/graphrag/raptor/mindmap）
+               目前仅使用“common”，保留其他后缀。
 
-    Returns:
-        Queue name string
+    返回：
+        队列名称字符串
 
-    Examples:
+    示例：
         get_svr_queue_name(0, "common") -> "te.0.common"
         get_svr_queue_name(1, "common") -> "te.1.common"
-        get_svr_queue_name(0) -> "te.0.common"  # default suffix="common"
-
-    """
+        get_svr_queue_name(0) -> "te.0.common" # 默认后缀="common"'''
     return f"{SVR_QUEUE_NAME}.{priority}.common"
 
 
 def get_svr_queue_names(suffix: str):
-    """Return queue names sorted by priority (high to low)."""
+    """返回按优先级（从高到低）排序的队列名称。"""
     return [get_svr_queue_name(priority, suffix) for priority in [1, 0]]
 
 
@@ -255,7 +253,7 @@ def init_secret_key():
     if secret_key and len(secret_key) >= 32:
         return secret_key
 
-    # Check if there's a configured secret key
+    # 检查是否有配置的密钥
     configured_key = get_base_config(RAG_FLOW_SERVICE_NAME, {}).get("secret_key")
     if configured_key and configured_key != str(date.today()) and len(configured_key) >= 32:
         return configured_key
@@ -265,28 +263,28 @@ def init_secret_key():
 def get_secret_key():
     global SECRET_KEY
     if SECRET_KEY is None:
-        # Why need cache it, if REDIS evict keys due to lack of memory, new secret key will be generated, cause all requests 401
+        # 为什么需要缓存它，如果 REDIS 由于内存不足而驱逐密钥，则会生成新的密钥，导致所有请求 401
         SECRET_KEY = _get_or_create_secret_key()
     return SECRET_KEY
 
 
 def _get_or_create_secret_key():
     # secret_key = os.environ.get("RAGFLOW_SECRET_KEY")
-    # if secret_key and len(secret_key) >= 32:
-    #     return secret_key
+    # 如果 secret_key 且 len(secret_key) >= 32：
+    # 返回 secret_key
     #
-    # # Check if there's a configured secret key
+    # 检查是否有配置的秘钥
     # configured_key = get_base_config(RAG_FLOW_SERVICE_NAME, {}).get("secret_key")
-    # if configured_key and configured_key != str(date.today()) and len(configured_key) >= 32:
-    #     return configured_key
+    # 如果 configured_key 和 configured_key != str(date.today()) 且 len(configured_key) >= 32：
+    # 返回 configured_key
 
-    # Generate a new secure key and warn about it
+    # 生成新的安全密钥并发出警告
     import logging
 
     generated_key = secrets.token_hex(32)
     secret_key = REDIS_CONN.get_or_create_secret_key("ragflow:system:secret_key", generated_key)
     if generated_key == secret_key:
-        logging.warning("SECURITY WARNING: Using auto-generated SECRET_KEY.")
+        logging.warning("安全警告：正在使用自动生成的 SECRET_KEY。")
     return secret_key
 
 
@@ -380,11 +378,11 @@ def init_settings():
     global SECRET_KEY
     SECRET_KEY = init_secret_key()
 
-    # authentication
+    # 认证
     authentication_conf = get_base_config("authentication", {})
 
     global CLIENT_AUTHENTICATION, HTTP_APP_KEY, GITHUB_OAUTH, FEISHU_OAUTH, OAUTH_CONFIG
-    # client
+    # 客户端
     CLIENT_AUTHENTICATION = authentication_conf.get("client", {}).get("switch", False)
     HTTP_APP_KEY = authentication_conf.get("client", {}).get("http_app_key")
     GITHUB_OAUTH = get_base_config("oauth", {}).get("github")
@@ -418,7 +416,7 @@ def init_settings():
         docStoreConn = rag.utils.gaussdb_conn.GaussDBConnection()
     elif lower_case_doc_engine == "serenedb":
         SERENEDB = get_base_config("serenedb", {})
-        # Imported lazily so psycopg2/SereneDB is only touched when selected.
+        # 延迟导入，因此 psycopg2/SereneDB 仅在选择时才会被触摸。
         from rag.utils import serenedb_conn
 
         docStoreConn = serenedb_conn.SereneDBConnection()
@@ -426,7 +424,7 @@ def init_settings():
         raise Exception(f"Not supported doc engine: {DOC_ENGINE}")
 
     global msgStoreConn
-    # use the same engine for message store
+    # 使用相同的引擎进行消息存储
     if DOC_ENGINE == "elasticsearch":
         ES = get_base_config("es", {})
         msgStoreConn = memory_es_conn.ESConnection()
@@ -436,9 +434,9 @@ def init_settings():
     elif lower_case_doc_engine in ["oceanbase", "seekdb"]:
         msgStoreConn = memory_ob_conn.OBConnection()
     elif lower_case_doc_engine == "gaussdb":
-        # Memory Store uses a dedicated adapter for message tables. It reads the
-        # same GaussDB configuration and shares the lazy connection pool with
-        # docStoreConn, but keeps its own table layout and query semantics.
+        # Memory Store 使用消息表专用适配器。它读取
+        # 与 GaussDB 相同的配置并共享惰性连接池
+        # docStoreConn，但保留其自己的表布局和查询语义。
         msgStoreConn = memory_gaussdb_conn.GaussDBMemoryConnection()
 
     global AZURE, S3, MINIO, OSS, GCS
@@ -456,10 +454,10 @@ def init_settings():
     global STORAGE_IMPL
     storage_impl = StorageFactory.create(Storage[STORAGE_IMPL_TYPE])
 
-    # Define crypto settings
+    # 定义加密设置
     crypto_enabled = os.environ.get("RAGFLOW_CRYPTO_ENABLED", "false").lower() == "true"
 
-    # Check if encryption is enabled
+    # 检查是否启用加密
     if crypto_enabled:
         try:
             from rag.utils.encrypted_storage import create_encrypted_storage
@@ -518,7 +516,7 @@ def check_and_install_torch():
         PARALLEL_DEVICES = torch.cuda.device_count()
         logging.info(f"found {PARALLEL_DEVICES} gpus")
     except Exception:
-        logging.info("can't import package 'torch'")
+        logging.info("无法导入包“torch”")
 
 
 def _parse_model_entry(entry):

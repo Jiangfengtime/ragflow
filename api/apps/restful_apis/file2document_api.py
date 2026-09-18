@@ -37,8 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 def _convert_files(file_ids, kb_ids, user_id, mode):
-    """Synchronous worker: add missing links or replace existing links."""
+    """在线程池中把工作区 File 映射为一个或多个知识库 Document。
+
+    ``add`` 只补充缺失的知识库关联；``replace`` 先删除该 File 的全部旧 Document
+    和 File2Document，再按 ``kb_ids`` 重建。这里不会触发文档解析，创建出的 Document
+    仍需调用 ``POST /documents/ingest`` 才会产生 Task 和 Chunk。
+    """
     replace_existing = mode == "replace"
+    created_count = 0
+    removed_count = 0
+    logger.info(
+        "文件关联知识库已开始 用户ID=%s 模式=%s 文件数=%d 知识库数=%d",
+        user_id,
+        mode,
+        len(file_ids),
+        len(kb_ids),
+    )
     for id in file_ids:
         e, file = FileService.get_by_id(id)
         if not e:
@@ -57,6 +71,7 @@ def _convert_files(file_ids, kb_ids, user_id, mode):
                     if not DocumentService.remove_document(doc, tenant_id):
                         raise RuntimeError("Database error (Document removal)!")
                 File2DocumentService.delete_by_document_id(doc_id)
+                removed_count += 1
             if existing_links:
                 File2DocumentService.delete_by_file_id(id)
         else:
@@ -94,12 +109,29 @@ def _convert_files(file_ids, kb_ids, user_id, mode):
                     "document_id": doc.id,
                 }
             )
+            created_count += 1
+            logger.debug(
+                "文件与知识库关联已创建 user_id=%s file_id=%s kb_id=%s doc_id=%s 模式=%s",
+                user_id,
+                id,
+                kb_id,
+                doc.id,
+                mode,
+            )
+    logger.info(
+        "文件关联知识库完成 用户ID=%s 模式=%s 新建关联数=%d 删除关联数=%d",
+        user_id,
+        mode,
+        created_count,
+        removed_count,
+    )
 
 
 @manager.route("/files/link-to-datasets", methods=["POST"])  # noqa: F821
 @login_required
 @validate_request("file_ids", "kb_ids")
 async def convert():
+    """校验权限并异步调度 File -> Document 关系转换。"""
     req = await get_request_json()
     kb_ids = req["kb_ids"]
     file_ids = req["file_ids"]
@@ -111,11 +143,11 @@ async def convert():
         files = FileService.get_by_ids(file_ids)
         files_set = {file.id: file for file in files}
 
-        # Validate all files exist before starting any work
+        # 在开始任何工作之前验证所有文件是否存在
         for file_id in file_ids:
             if not files_set.get(file_id):
                 logger.warning(
-                    "user_id=%s resource_type=file resource_id=%s action=validate_file_lookup result=not_found file_ids=%s kb_ids=%s",
+                    "文件关联知识库校验失败 用户ID=%s 资源类型=文件 资源ID=%s 原因=文件不存在 文件ID列表=%s 知识库ID列表=%s",
                     current_user.id,
                     file_id,
                     file_ids,
@@ -123,13 +155,13 @@ async def convert():
                 )
                 return get_data_error_result(message="File not found!")
 
-        # Validate all kb_ids exist before scheduling background work
+        # 在调度后台工作之前验证所有 kb_ids 是否存在
         kb_map = {}
         for kb_id in kb_ids:
             e, kb = KnowledgebaseService.get_by_id(kb_id)
             if not e:
                 logger.warning(
-                    "user_id=%s resource_type=dataset resource_id=%s action=validate_dataset_lookup result=not_found file_ids=%s kb_ids=%s",
+                    "文件关联知识库校验失败 用户ID=%s 资源类型=知识库 资源ID=%s 原因=知识库不存在 文件ID列表=%s 知识库ID列表=%s",
                     current_user.id,
                     kb_id,
                     file_ids,
@@ -138,7 +170,7 @@ async def convert():
                 return get_data_error_result(message="Can't find this dataset!")
             kb_map[kb_id] = kb
 
-        # Expand folders to their innermost file IDs
+        # 将文件夹展开到最里面的文件 IDs
         all_file_ids = []
         for file_id in file_ids:
             file = files_set[file_id]
@@ -152,7 +184,7 @@ async def convert():
             e, file = FileService.get_by_id(file_id)
             if not e or not file:
                 logger.warning(
-                    "user_id=%s resource_type=file resource_id=%s action=validate_expanded_file_lookup result=not_found file_ids=%s kb_ids=%s",
+                    "展开目录后文件校验失败 user_id=%s 资源类型=文件 resource_id=%s 原因=文件不存在 file_ids=%s kb_ids=%s",
                     user_id,
                     file_id,
                     file_ids,
@@ -161,7 +193,7 @@ async def convert():
                 return get_data_error_result(message="File not found!")
             if not check_file_team_permission(file, user_id):
                 logger.warning(
-                    "user_id=%s resource_type=file resource_id=%s action=authorize_file result=denied file_ids=%s kb_ids=%s",
+                    "文件关联知识库权限校验失败 用户ID=%s 资源类型=文件 资源ID=%s 结果=拒绝 文件ID列表=%s 知识库ID列表=%s",
                     user_id,
                     file_id,
                     file_ids,
@@ -172,7 +204,7 @@ async def convert():
         for kb_id, kb in kb_map.items():
             if not check_kb_team_permission(kb, user_id):
                 logger.warning(
-                    "user_id=%s resource_type=dataset resource_id=%s action=authorize_dataset result=denied file_ids=%s kb_ids=%s",
+                    "文件关联知识库权限校验失败 用户ID=%s 资源类型=知识库 资源ID=%s 结果=拒绝 文件ID列表=%s 知识库ID列表=%s",
                     user_id,
                     kb_id,
                     file_ids,
@@ -180,14 +212,14 @@ async def convert():
                 )
                 return get_data_error_result(message="no authorization")
 
-        # Run the blocking DB work in a thread so the event loop is not blocked.
-        # For large folders this prevents 504 Gateway Timeout by returning as
-        # soon as the background task is scheduled.
+        # 关系转换可能递归处理整个目录并删除旧索引，属于阻塞型数据库/存储操作；
+        # 在线程池中 fire-and-forget 后立即响应。此处 data=true 表示“已调度”，
+        # 真正完成要观察“文件关联知识库完成”日志。
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, _convert_files, all_file_ids, kb_ids, user_id, mode)
-        future.add_done_callback(lambda f: logging.error("_convert_files failed: %s", f.exception()) if f.exception() else None)
+        future.add_done_callback(lambda f: logging.error("文件关联知识库后台任务失败: %s", f.exception()) if f.exception() else None)
         logger.info(
-            "user_id=%s resource_type=file_to_dataset_link resource_id=batch action=schedule_convert result=scheduled file_ids=%s kb_ids=%s",
+            "文件关联知识库后台任务已调度 用户ID=%s 资源ID=批次 文件ID列表=%s 知识库ID列表=%s",
             user_id,
             all_file_ids,
             kb_ids,

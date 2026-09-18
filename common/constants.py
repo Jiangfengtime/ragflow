@@ -85,6 +85,7 @@ class ActiveEnum(Enum):
 
 class LLMType(StrEnum):
     """tenant_model 中模型能力类型；同一供应商可为不同能力保存独立实例和 API Key。"""
+
     CHAT = "chat"  # 对话、关键词提取、元数据生成等生成式调用。
     EMBEDDING = "embedding"  # 文本/查询编码为向量；维度决定 q_{dim}_vec 字段。
     ASR = "asr"  # 音频转文字。
@@ -106,6 +107,7 @@ class ModelTypeBinary(Enum):
 
 class TaskStatus(StrEnum):
     """Document.run 的展示状态；Task.progress 则记录单个分页任务的细粒度进度。"""
+
     UNSTART = "0"  # 文件已上传，但尚未调用 /documents/ingest 创建任务。
     RUNNING = "1"  # 已入队或正在被 Worker 处理；不代表当前一定占用 CPU。
     CANCEL = "2"  # 用户请求取消；Worker 检测 Redis 取消标记后停止并清理。
@@ -124,6 +126,7 @@ class ConnectorTaskType(StrEnum):
 
 class ParserType(StrEnum):
     """Document.parser_id；决定 Worker 选择哪个 rag.app.* 模块解析并切分原文件。"""
+
     PRESENTATION = "presentation"  # 演示文稿。
     LAWS = "laws"  # 法律文本。
     MANUAL = "manual"  # 手册。
@@ -190,11 +193,11 @@ class PipelineTaskType(StrEnum):
     GRAPH_RAG = "GraphRAG"
     MINDMAP = "Mindmap"
     MEMORY = "Memory"
-    # Member name kept as ARTIFACT for back-compat; value is "Wiki" so the
-    # runtime task_type (``.lower()`` == "wiki") matches the wiki index/task type.
+    # 会员名称保留为 ARTIFACT 以便向后兼容；值是“Wiki”所以
+    # 运行时 task_type (``.lower()`` == "wiki") 与 wiki index/task 类型匹配。
     ARTIFACT = "Wiki"
     SKILL = "Skill"
-    # KB-wide structure-graph merge tasks (rebuild_dataset_structure_graph_json).
+    # KB范围的结构图合并任务（rebuild_dataset_structure_graph_json）。
     STRUCTURE_GRAPH = "StructureGraph"
     STRUCTURE_MINDMAP = "StructureMindmap"
     TIMELINE = "Timeline"
@@ -254,7 +257,7 @@ class ForgettingPolicy(StrEnum):
     FIFO = "FIFO"
 
 
-# environment
+# 环境
 # ENV_STRONG_TEST_COUNT = "STRONG_TEST_COUNT"
 # ENV_RAGFLOW_SECRET_KEY = "RAGFLOW_SECRET_KEY"
 # ENV_REGISTER_ENABLED = "REGISTER_ENABLED"
@@ -265,7 +268,7 @@ class ForgettingPolicy(StrEnum):
 # ENV_COMPONENT_EXEC_TIMEOUT = "COMPONENT_EXEC_TIMEOUT"
 # ENV_TRINO_USE_TLS = "TRINO_USE_TLS"
 # ENV_MAX_FILE_NUM_PER_USER = "MAX_FILE_NUM_PER_USER"
-# ENV_MACOS = "MACOS"
+# ENV_MACOS =“MACOS”
 # ENV_RAGFLOW_DEBUGPY_LISTEN = "RAGFLOW_DEBUGPY_LISTEN"
 # ENV_WERKZEUG_RUN_MAIN = "WERKZEUG_RUN_MAIN"
 # ENV_DISABLE_SDK = "DISABLE_SDK"
@@ -320,9 +323,9 @@ SVR_QUEUE_NAME = "te"
 SVR_CONSUMER_GROUP_NAME = "rag_flow_svr_task_broker"
 TAG_FLD = "tag_feas"
 
-# Maximum page number used as "unlimited" sentinel value.
-# Parsing layer (chunk/Pdf.__call__) uses MAXIMUM_PAGE_NUMBER.
-# Task/DB layer (Task model) uses MAXIMUM_PAGE_NUMBER * 1000 to avoid collision with user-specified page ranges.
+# 用作“无限”标记值的最大页码。
+# 解析层（chunk/Pdf.__call__）使用MAXIMUM_PAGE_NUMBER。
+# Task/DB 层（Task 模型）使用 MAXIMUM_PAGE_NUMBER * 1000 来避免与用户指定的页面范围发生冲突。
 MAXIMUM_PAGE_NUMBER = 100000
 MAXIMUM_TASK_PAGE_NUMBER = MAXIMUM_PAGE_NUMBER * 1000
 

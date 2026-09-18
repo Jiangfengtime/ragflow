@@ -81,7 +81,7 @@ from rag.nlp import search
 
 
 def _normalize_legacy_raptor_config(req: dict) -> None:
-    """Drop RAPTOR fields removed from the current parser-config schema."""
+    """从当前解析器配置架构中删除 RAPTOR 字段。"""
     parser_config = req.get("parser_config")
     if not isinstance(parser_config, dict):
         return
@@ -105,7 +105,7 @@ def _normalize_legacy_raptor_config(req: dict) -> None:
         raptor["max_token"] = 512
         normalized_fields.append("max_token")
     if normalized_fields:
-        logging.debug("Document RAPTOR config normalized legacy fields: %s", sorted(normalized_fields))
+        logging.debug("Document RAPTOR 配置标准化遗留字段：%s", sorted(normalized_fields))
 
 
 def _normalize_parser_config_compilation_template_group_ids(parser_config) -> bool:
@@ -171,7 +171,7 @@ async def upload_info(tenant_id: str):
             try:
                 assert_url_is_safe(url)
             except ValueError as ve:
-                logging.warning("upload_info: rejected unsafe url: %s", ve)
+                logging.warning("upload_info：拒绝不安全网址：%s", ve)
                 return get_error_argument_result(str(ve))
 
             data = await thread_pool_exec(FileService.upload_info, tenant_id, None, url)
@@ -184,7 +184,7 @@ async def upload_info(tenant_id: str):
         results = [await thread_pool_exec(FileService.upload_info, tenant_id, f, None) for f in file_objs]
         return get_result(data=results)
     except Exception as e:
-        logging.exception("upload_info failed")
+        logging.exception("upload_info 失败")
         return server_error_response(e)
 
 
@@ -243,23 +243,23 @@ async def update_document(tenant_id, dataset_id, document_id):
     req = await get_request_json()
     _normalize_legacy_raptor_config(req)
 
-    # An explicit null name is a type error, not an unset field.
+    # 显式空名称是类型错误，而不是未设置的字段。
     if "name" in req and req["name"] is None:
         return get_error_data_result(message="Field: <name> - Message: <Input should be a valid string> - Value: <None>")
 
-    # Verify ownership and existence of dataset and document
+    # 验证数据集和文档的所有权和存在性
     if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
         return get_error_data_result(message="you don't own the dataset")
     e, kb = KnowledgebaseService.get_by_id(dataset_id)
     if not e:
         return get_error_data_result(message="Can't find this dataset!")
 
-    # Prepare data for validation
+    # 准备数据进行验证
     docs = DocumentService.query(kb_id=dataset_id, id=document_id)
     if not docs:
         return get_error_data_result(message="the dataset doesn't own the document")
 
-    # Validate document update request parameters
+    # 验证文档更新请求参数
     try:
         update_doc_req = UpdateDocumentReq(**req)
     except ValidationError as e:
@@ -267,45 +267,50 @@ async def update_document(tenant_id, dataset_id, document_id):
 
     doc = docs[0]
 
-    # further check with inner status (from DB)
+    # 进一步检查内部状态（来自DB）
     error_msg, error_code = validate_document_update_fields(update_doc_req, doc, req)
     if error_msg:
         return get_error_data_result(message=error_msg, code=error_code)
 
-    # All validations passed, now perform all updates
-    # meta_fields provided, then update it
+    # 所有验证均已通过，现在执行所有更新
+    # 提供了
+    # meta_fields，然后更新它
     if "meta_fields" in req:
         if not DocMetadataService.update_document_metadata(document_id, update_doc_req.meta_fields):
             return get_error_data_result(message="Failed to update metadata")
-    # doc name provided from request and diff with existing value, update
+    # 文档名称由请求提供，并与现有值进行比较，更新
+    # 提供了
     if "name" in req and req["name"] != doc.name:
         if error := update_document_name_only(document_id, req["name"]):
             return error
 
-    # "parser_id" provided but does not match with existing doc's file type
+    # "parser_id" 但与现有文档的文件类型不匹配
+    # 提供了
     if "parser_id" in req and ((doc.type == FileType.VISUAL and req["parser_id"] != "picture") or (re.search(r"\.(ppt|pptx|pages)$", doc.name) and req["parser_id"] != "presentation")):
         return get_data_error_result(message="Not supported yet!")
 
-    # parser config provided (already validated in UpdateDocumentReq), update it.
-    # Changing the document-scoped knowledge compilation template group must
-    # not remove the existing chunks.
+    # 解析器配置（已在 UpdateDocumentReq 中验证），更新它。
+    # 更改文档范围的知识编译模板组必须
+    # 不删除现有块。
     if update_doc_req.parser_config:
         req["parser_config"].update(update_doc_req.parser_config.ext)
         _normalize_parser_config_compilation_template_group_ids(req["parser_config"])
         DocumentService.update_parser_config(doc.id, req["parser_config"])
 
-    # A non-empty pipeline_id selects pipeline parsing; an explicitly empty
-    # value clears it and switches back to the direct parser path.
+    # 非空 pipeline_id 选择管道解析；明确为空
+    # 值将其清除并切换回直接解析器路径。
+    # 提供
     if "pipeline_id" in req:
         if error := reset_document_for_reparse(doc, tenant_id, pipeline_id=update_doc_req.pipeline_id or ""):
             return error
-    # chunk method provided - the update method will check if it's different with existing one
+    # 块方法 - 更新方法将检查它是否与现有方法不同
     elif update_doc_req.chunk_method:
         if error := update_chunk_method(req, doc, tenant_id):
             return error
 
-    if "enabled" in req:  # already checked in UpdateDocumentReq - it's int if present
-        # "enabled" flag provided, the update method will check if it's changed and then update if so
+    if "enabled" in req:  # 已在 UpdateDocumentReq 中签入 - 如果存在则为 int
+        # 提供了
+        # "enabled" 标志，更新方法将检查是否更改，如果更改则更新
         if error := update_document_status_only(int(req["enabled"]), doc, kb):
             return error
 
@@ -349,7 +354,7 @@ async def metadata_summary(dataset_id, tenant_id):
     """
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
-    # Get doc_ids from query parameters (comma-separated string)
+    # 从查询参数中获取doc_ids（逗号分隔的字符串）
     doc_ids_param = request.args.get("doc_ids", "")
     doc_ids = doc_ids_param.split(",") if doc_ids_param else None
     try:
@@ -538,7 +543,7 @@ async def upload_document(dataset_id, tenant_id):
 
     # 检查权限, 防止用户向不属于自己的知识库上传文件。
     if not check_kb_team_permission(kb, tenant_id):
-        logging.error("no authorization")
+        logging.error("无授权")
         return get_error_data_result(message="no authorization", code=RetCode.AUTHENTICATION_ERROR)
 
     if upload_type == "web":
@@ -576,7 +581,7 @@ async def _upload_web_document(dataset_id, kb, tenant_id):
     try:
         blob = await thread_pool_exec(html2pdf, url)
     except Exception as e:
-        logging.warning("html2pdf failed for %s, %s", dataset_id, str(e))
+        logging.warning("html2pdf 对于 %s、%s 失败", dataset_id, str(e))
         return get_error_data_result(message=str(e), code=RetCode.SERVER_ERROR)
     if not blob:
         return server_error_response(ValueError("Download failure."))
@@ -676,27 +681,27 @@ async def _upload_local_documents(kb, tenant_id):
     form = await request.form
     files = await request.files
     if "file" not in files:
-        logging.error("No file part!")
+        logging.error("无文件部分！")
         return get_error_data_result(message="No file part!", code=RetCode.ARGUMENT_ERROR)
 
     file_objs = files.getlist("file")
     for file_obj in file_objs:
         if file_obj is None or file_obj.filename is None or file_obj.filename == "":
-            logging.error("No file selected!")
+            logging.error("未选择文件！")
             return get_error_data_result(message="No file selected!", code=RetCode.ARGUMENT_ERROR)
         if len(file_obj.filename.encode("utf-8")) > FILE_NAME_LEN_LIMIT:
             msg = f"File name must be {FILE_NAME_LEN_LIMIT} bytes or less."
             logging.error(msg)
             return get_error_data_result(message=msg, code=RetCode.ARGUMENT_ERROR)
 
-    # Parse optional parser_config overrides from form data
+    # 从表单数据中解析可选的 parser_config 覆盖
     parser_config_override = None
     raw_parser_config = form.get("parser_config")
     if raw_parser_config:
         try:
             parsed = json.loads(raw_parser_config)
             if isinstance(parsed, dict):
-                # Only allow known table column config keys to prevent arbitrary overrides
+                # 只允许已知的表列配置键以防止任意覆盖
                 allowed_keys = {"table_column_mode", "table_column_roles"}
                 parser_config_override = {k: v for k, v in parsed.items() if k in allowed_keys}
                 if not parser_config_override:
@@ -717,7 +722,7 @@ async def _upload_local_documents(kb, tenant_id):
 
     # 仅记录数量和 ID，不记录文件内容；用于把 HTTP 上传日志与后续 ingest/Task 日志关联。
     logging.info(
-        "document_upload_completed tenant_id=%s kb_id=%s uploaded=%d failed=%d doc_ids=%s",
+        "文档上传完成 租户ID=%s 知识库ID=%s 上传数=%d 失败数=%d 文档ID列表=%s",
         tenant_id,
         kb.id,
         len(files),
@@ -725,7 +730,7 @@ async def _upload_local_documents(kb, tenant_id):
         [doc["id"] for doc, _ in files],
     )
 
-    # Handle partial success: some files uploaded successfully, some had errors
+    # 处理部分成功：部分文件上传成功，部分文件有错误
     is_partial_success = err and files
 
     if err and not is_partial_success:
@@ -740,7 +745,7 @@ async def _upload_local_documents(kb, tenant_id):
 
     # Service 返回 (doc, blob) 是为了供调用链内部复用；HTTP 响应只暴露 Document 元数据，
     # 原始二进制已经进入对象存储，不能随 JSON 再返回给浏览器。
-    files = [f[0] for f in files]  # remove the blob
+    files = [f[0] for f in files]  # 删除斑点
     return_raw_files = request.args.get("return_raw_files", "false").lower() == "true"
 
     if return_raw_files:
@@ -750,7 +755,7 @@ async def _upload_local_documents(kb, tenant_id):
         # 真正的运行状态会在 /documents/ingest 中由 DocumentService.begin2parse() 更新。
         doc_data = [map_doc_keys_with_run_status(doc, run_status="0") for doc in files]
 
-    # For partial success, include error message along with successful uploads
+    # 对于部分成功，请包含错误消息以及成功上传
     if is_partial_success:
         msg = "\n".join(err)
         logging.warning(f"Partial upload success: {len(files)} succeeded, {len(err)} failed - {msg}")
@@ -893,43 +898,42 @@ def list_docs(dataset_id, tenant_id):
 
 
 def _get_docs_with_request(req, dataset_id: str):
-    """Get documents with request parameters from a dataset.
+    """从数据集中获取带有请求参数的文档。
 
-    This function extracts filtering parameters from the request and returns
-    a list of documents matching the specified criteria.
+    该函数从请求中提取过滤参数并返回
+    符合指定条件的文档列表。
 
-    Args:
-        req: The request object containing query parameters.
-            - page (int): Page number for pagination (default: 1).
-            - page_size (int): Number of documents per page (default: 30).
-            - orderby (str): Field to order by (default: "create_time").
-            - desc (bool): Whether to order in descending order (default: True).
-            - keywords (str): Keywords to search in document names.
-            - suffix (list): File suffix filters.
-            - types (list): Document type filters.
-            - run (list): Processing status filters.
-            - create_time_from (int): Start timestamp for time range filter.
-            - create_time_to (int): End timestamp for time range filter.
-            - return_empty_metadata (bool|str): Whether to return documents with empty metadata.
-            - metadata_condition (str): JSON string for complex metadata conditions.
-            - metadata (str): JSON string for simple metadata key-value matching.
-        dataset_id: The dataset ID to retrieve documents from.
+    参数：
+        req：包含查询参数的请求对象。
+            - page (int)：分页的页码（默认值：1）。
+            - page_size（int）：每页文档数（默认值：30）。
+            - orderby (str)：排序依据的字段（默认值："create_time"）。
+            - desc (bool)：是否按降序排序（默认值：True）。
+            - keywords (str)：在文档名称中搜索的关键字。
+            - 后缀（列表）：File 后缀过滤器。
+            - 类型（列表）：Document 型过滤器。
+            - 运行（列表）：处理状态过滤器。
+            - create_time_from (int)：时间范围过滤器的开始时间戳。
+            - create_time_to (int)：时间范围过滤器的结束时间戳。
+            - return_empty_metadata (bool|str)：是否返回元数据为空的文档。
+            - metadata_condition (str)：复杂元数据条件的 JSON 字符串。
+            - 元数据 (str)：JSON 字符串，用于简单的元数据键值匹配。
+        dataset_id：要从中检索文档的数据集 ID。
 
-    Returns:
-        A tuple of (err_code, err_message, docs, total):
-            - err_code (int): Success code (RetCode.SUCCESS) if successful, or error code if validation fails.
-            - err_message (str): Empty string if successful, or error message if validation fails.
-            - docs (list): List of document dictionaries matching the criteria, or empty list on error.
-            - total (int): Total number of documents matching the criteria.
+    返回：
+        元组（err_code，err_message，文档，总计）：
+            - err_code (int)：如果成功，则为成功代码 (RetCode.SUCCESS)；如果验证失败，则为错误代码。
+            - err_message (str)：如果成功则为空字符串，如果验证失败则为错误消息。
+            - docs（列表）：匹配条件的文档字典列表，或错误时为空列表。
+            - Total (int)：符合条件的文档总数。
 
-    Note:
-        - The function supports filtering by document types, processing status, keywords, and time range.
-        - Metadata filtering supports both simple key-value matching and complex conditions with operators.
-    """
+    注意：
+        - 支持按文档类型、处理状态、关键词、时间范围进行过滤。
+        - 元数据过滤既支持简单的键值匹配，也支持带有运算符的复杂条件。"""
     q = req.args
 
-    # Invalid or negative pagination values fall back to defaults
-    # instead of leaking internal conversion/SQL errors.
+    # 无效或负分页值回退到默认值
+    # 而不是泄漏内部 conversion/SQL 错误。
     page = validate_rest_api_page(q.get("page", DEFAULT_PAGE))
     page_size = validate_rest_api_page_size(q.get("page_size", DEFAULT_PAGE_SIZE))
 
@@ -939,7 +943,8 @@ def _get_docs_with_request(req, dataset_id: str):
     desc = str(q.get("desc", "true")).strip().lower() != "false"
     keywords = q.get("keywords", "")
 
-    # filters - align with OpenAPI parameter names
+    # 过滤器 - 与 OpenAPI 参数名称对齐
+    # 已提供
     suffix = q.getlist("suffix")
 
     types = q.getlist("types")
@@ -963,7 +968,7 @@ def _get_docs_with_request(req, dataset_id: str):
     if doc_id:
         if not DocumentService.query(id=doc_id, kb_id=dataset_id):
             return RetCode.DATA_ERROR, f"you don't own the document {doc_id}", [], 0
-        doc_ids_filter = [doc_id]  # id provided, ignore other filters
+        doc_ids_filter = [doc_id]  # id，忽略其他过滤器
     if doc_name and not DocumentService.query(name=doc_name, kb_id=dataset_id):
         return RetCode.DATA_ERROR, f"you don't own the document {doc_name}", [], 0
 
@@ -981,7 +986,7 @@ def _get_docs_with_request(req, dataset_id: str):
         dataset_id, page, page_size, orderby, desc, keywords, run_status_converted, types, suffix, name=doc_name, doc_ids=doc_ids_filter, return_empty_metadata=return_empty_metadata
     )
 
-    # time range filter (0 means no bound)
+    # 时间范围过滤器（0表示无限制）
     create_time_from = int(q.get("create_time_from", 0))
     create_time_to = int(q.get("create_time_to", 0))
     if create_time_from or create_time_to:
@@ -991,7 +996,7 @@ def _get_docs_with_request(req, dataset_id: str):
 
 
 def _get_doc_filters_with_request(req, dataset_id: str):
-    """Get aggregated document filters with request parameters from a dataset."""
+    """从数据集中获取带有请求参数的聚合文档过滤器。"""
     q = req.args
 
     keywords = q.get("keywords", "")
@@ -1038,66 +1043,23 @@ def _parse_run_status_filter(req_args):
 
 
 def _parse_doc_id_filter_with_metadata(req, kb_id):
-    """Parse document ID filter based on metadata conditions from the request.
+    """根据请求中的元数据条件计算允许检索的文档 ID。
 
-    This function extracts and processes metadata filtering parameters from the request
-    and returns a list of document IDs that match the specified criteria. It supports
-    two filtering modes: simple metadata key-value matching and complex metadata
-    conditions with operators.
+    支持两种过滤方式：``metadata`` 用于简单键值精确匹配，``metadata_condition``
+    用于带运算符的复合条件。两者同时存在时使用 AND 连接。
 
-    Args:
-        req: The request object containing filtering parameters.
-            - return_empty_metadata (bool|str): If True, returns all documents regardless
-              of their metadata. Can be a boolean or string "true"/"false".
-            - metadata_condition (str): JSON string containing complex metadata conditions
-              with optional "logic" (and/or) and "conditions" list. Each condition should
-              have "name" (key), "comparison_operator", and "value" fields.
-            - metadata (str): JSON string containing key-value pairs for exact metadata
-              matching. Values can be a single value or list of values (OR logic within
-              same key). Can include special key "empty_metadata" to indicate documents
-              with empty metadata.
-        kb_id: The knowledge base ID to filter documents from.
+    参数：
+        req: 请求参数。其中 ``return_empty_metadata`` 表示是否返回空元数据文档；
+            ``metadata`` 是键值 JSON；``metadata_condition`` 包含 ``logic`` 和
+            ``conditions``，每个条件包含 ``name``、``comparison_operator`` 和 ``value``。
+        kb_id: 需要过滤的知识库 ID。
 
-    Returns:
-        A tuple of (err_code, err_message, docs, return_empty_metadata):
-            - err_code (int): Success code (RetCode.SUCCESS) if successful, or error code if validation fails.
-            - err_message (str): Empty string if successful, or error message if validation fails.
-            - docs (list): List of document IDs matching the metadata criteria,
-              or empty list if no filter should be applied or on error.
-            - return_empty_metadata (bool): The processed flag indicating whether to
-              return documents with empty metadata.
+    返回：
+        ``(err_code, err_message, docs, return_empty_metadata)``。``docs`` 是满足条件的
+        文档 ID 列表；校验失败时同时返回错误码和错误信息。
 
-    Note:
-        - When both metadata and metadata_condition are provided, they are combined with AND logic.
-        - The metadata_condition uses operators like: =, !=, >, <, >=, <=, contains, not contains,
-          in, not in, start with, end with, empty, not empty.
-        - The metadata parameter performs exact matching where values are OR'd within the same key
-          & AND'd across different keys.
-
-    Examples:
-        Simple metadata filter (exact match):
-            req = {"metadata": '{"author": ["John", "Jane"]}'}
-            # Returns documents where author is John OR Jane
-
-        Simple metadata filter with multiple keys:
-            req = {"metadata": '{"author": "John", "status": "published"}'}
-            # Returns documents where author is John AND status is published
-
-        Complex metadata conditions:
-            req = {"metadata_condition": '{"logic": "and", "conditions": [{"name": "status", "comparison_operator": "eq", "value": "published"}]}'}
-            # Returns documents where status equals "published"
-
-        Complex conditions with multiple operators:
-            req = {"metadata_condition": '{"logic": "or", "conditions": [{"name": "priority", "comparison_operator": "=", "value": "high"}, {"name": "status", "comparison_operator": "contains", "value": "urgent"}]}'}
-            # Returns documents where priority is high OR status contains "urgent"
-
-        Return empty metadata:
-            req = {"return_empty_metadata": True}
-            # Returns all documents regardless of metadata
-
-        Combined metadata and metadata_condition:
-            req = {"metadata": '{"author": "John"}', "metadata_condition": '{"logic": "and", "conditions": [{"name": "status", "comparison_operator": "=", "value": "published"}]}'}
-            # Returns documents where author is John AND status equals published
+    运算符包括 ``=``、``!=``、``>``、``<``、``contains``、``in``、``start with``、
+    ``empty`` 及其否定形式。同一元数据键的多个值按 OR 匹配，不同键之间按 AND 匹配。
     """
     return_empty_metadata = req.get("return_empty_metadata", False)
     if isinstance(return_empty_metadata, str):
@@ -1218,11 +1180,11 @@ async def delete_documents(tenant_id, dataset_id):
         return get_error_argument_result(err)
 
     try:
-        # Validate dataset exists and user has permission
+        # 验证数据集存在并且用户有权限
         if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
             return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
 
-        # Get documents to delete
+        # 获取要删除的文档
         doc_ids = req.get("ids") or []
         delete_all = req.get("delete_all", False)
         if not delete_all and len(doc_ids) == 0:
@@ -1238,14 +1200,14 @@ async def delete_documents(tenant_id, dataset_id):
         if invalid_ids:
             return get_error_data_result(message=f"These documents do not belong to dataset {dataset_id} or Document not found: {', '.join(invalid_ids)}")
 
-        # make sure each id is unique
+        # 确保每个 id 都是唯一的
         unique_doc_ids, duplicate_messages = check_duplicate_ids(doc_ids, "document")
         if duplicate_messages:
             logging.warning(f"duplicate_messages:{duplicate_messages}")
         else:
             doc_ids = unique_doc_ids
 
-        # Delete documents using existing FileService.delete_docs
+        # 使用现有 FileService.delete_docs 删除文档
         errors = await thread_pool_exec_long_time(FileService.delete_docs, doc_ids, tenant_id)
 
         if errors:
@@ -1298,30 +1260,30 @@ async def update_metadata_config(tenant_id, dataset_id, document_id):
       200:
         description: Document updated successfully.
     """
-    # Verify ownership and existence of dataset
+    # 验证数据集的所有权和存在性
     if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
         return get_error_data_result(message="you don't own the dataset")
 
-    # Verify document exists in the dataset
+    # 验证数据集中是否存在文档
     doc = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not doc:
         msg = f"document {document_id} not found in dataset {dataset_id}"
         return get_error_data_result(message=msg)
     doc = doc[0]
 
-    # Get request body
+    # 获取请求正文
     req = await get_request_json()
     if "metadata" not in req:
         return get_error_argument_result(message="metadata is required")
 
-    # Update parser config with metadata
+    # 使用元数据更新解析器配置
     try:
         DocumentService.update_parser_config(doc.id, {"metadata": req["metadata"]})
     except Exception as e:
-        logging.error("error when update_parser_config", exc_info=e)
+        logging.error("当 update_parser_config 时出错", exc_info=e)
         return get_json_result(code=RetCode.EXCEPTION_ERROR, message=repr(e))
 
-    # Get updated document
+    # 获取更新文档
     try:
         e, doc = DocumentService.get_by_id(doc.id)
         if not e:
@@ -1438,46 +1400,46 @@ async def update_metadata(tenant_id, dataset_id):
       200:
         description: Metadata updated successfully.
     """
-    # Verify ownership of dataset
+    # 验证数据集的所有权
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
         return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
 
-    # Get request body
+    # 获取请求正文
     req = await get_request_json()
     selector = req.get("selector", {}) or {}
     updates = req.get("updates", []) or []
     deletes = req.get("deletes", []) or []
 
-    # Validate selector
+    # 验证选择器
     if not isinstance(selector, dict):
         return get_error_data_result(message="selector must be an object.")
     if not isinstance(updates, list) or not isinstance(deletes, list):
         return get_error_data_result(message="updates and deletes must be lists.")
 
-    # Validate metadata_condition
+    # 验证 metadata_condition
     metadata_condition = selector.get("metadata_condition", {}) or {}
     if metadata_condition and not isinstance(metadata_condition, dict):
         return get_error_data_result(message="metadata_condition must be an object.")
 
-    # Validate document_ids
+    # 验证 document_ids
     document_ids = selector.get("document_ids", []) or []
     if document_ids and not isinstance(document_ids, list):
         return get_error_data_result(message="document_ids must be a list.")
 
-    # Validate updates
+    # 验证更新
     for upd in updates:
         if not isinstance(upd, dict) or not upd.get("key") or "value" not in upd:
             return get_error_data_result(message="Each update requires key and value.")
 
-    # Validate deletes
+    # 验证删除
     for d in deletes:
         if not isinstance(d, dict) or not d.get("key"):
             return get_error_data_result(message="Each delete requires key.")
 
-    # Initialize target document IDs
+    # 初始化目标文档 IDs
     target_doc_ids = set()
 
-    # If document_ids provided, validate they belong to the dataset
+    # 如果提供了 document_ids，则验证它们属于数据集
     if document_ids:
         kb_doc_ids = KnowledgebaseService.list_documents_by_ids([dataset_id])
         invalid_ids = set(document_ids) - set(kb_doc_ids)
@@ -1485,7 +1447,7 @@ async def update_metadata(tenant_id, dataset_id):
             return get_error_data_result(message=f"These documents do not belong to dataset {dataset_id}: {', '.join(invalid_ids)}")
         target_doc_ids = set(document_ids)
 
-    # Apply metadata_condition filtering if provided
+    # 应用 metadata_condition 过滤（如果提供）
     if metadata_condition:
         metas = DocMetadataService.get_flatted_meta_by_kbs([dataset_id])
         filtered_ids = set(meta_filter(metas, convert_conditions(metadata_condition), metadata_condition.get("logic", "and")))
@@ -1493,15 +1455,15 @@ async def update_metadata(tenant_id, dataset_id):
         if metadata_condition.get("conditions") and not target_doc_ids:
             return get_result(data={"updated": 0, "matched_docs": 0})
 
-    # Convert to list and perform update
+    # 转换为列表并执行更新
     target_doc_ids = list(target_doc_ids)
     updated = DocMetadataService.batch_update_metadata(dataset_id, target_doc_ids, updates, deletes)
     return get_result(data={"updated": updated, "matched_docs": len(target_doc_ids)})
 
 
 @manager.route("/documents/ingest", methods=["POST"])  # noqa: F821
-@login_required # 用户必须已经登录
-@add_tenant_id_to_kwargs # 把当前登录用户对应的租户 ID 传入函数
+@login_required  # 用户必须已经登录
+@add_tenant_id_to_kwargs  # 把当前登录用户对应的租户 ID 传入函数
 async def ingest(tenant_id):
     # 格式: {"doc_ids":["096e25b6a92e11f18363f62115845b6f"],"run":1}, 如果是重新解析: {'apply_kb': False, 'delete': True, 'doc_ids': ['096e25b6a92e11f18363f62115845b6f'], 'run': 1}
     req = await get_request_json()
@@ -1523,7 +1485,7 @@ async def ingest(tenant_id):
 
         return get_json_result(data=True)
     except Exception as e:
-        logging.exception("document ingest/run failed")
+        logging.exception("文档 ingest/run 失败")
         return server_error_response(e)
 
 
@@ -1535,7 +1497,7 @@ def _run_sync(user_id: str, req):
     消息写 Redis Stream。HTTP 层在线程池中调用本方法，投递完成后即可响应前端。
     """
     logging.info(
-        "document_ingest_requested tenant_id=%s run=%s delete=%s apply_kb=%s doc_count=%d",
+        "文档解析请求已接收 租户ID=%s 运行标记=%s 删除旧数据=%s 应用知识库配置=%s 文档数=%d",
         user_id,
         req.get("run"),
         bool(req.get("delete")),
@@ -1549,7 +1511,7 @@ def _run_sync(user_id: str, req):
 
     kb_table_num_map = {}
     for doc_id in req["doc_ids"]:
-        info = {"run": str(req["run"]), "progress": 0} # 构造文档状态
+        info = {"run": str(req["run"]), "progress": 0}  # 构造文档状态
         rerun_with_delete = str(req["run"]) == TaskStatus.RUNNING.value and req.get("delete", False)
         # 如果是“重新解析并删除旧结果”，重置数据：
         if rerun_with_delete:
@@ -1571,14 +1533,14 @@ def _run_sync(user_id: str, req):
             if str(doc.run) in [TaskStatus.RUNNING.value, TaskStatus.CANCEL.value] or has_unfinished_task:
                 # 取消任务
                 cancel_all_task_of(doc_id)
-                # Append a "stopped by user" marker so the history is preserved and
-                # the document no longer looks like it is still waiting in the queue.
+                # 附加 "stopped by user" 标记，以便保留历史记录并
+                # 文档不再看起来仍在队列中等待。
                 cancel_doc_msg = f"\n{datetime.now().strftime('%H:%M:%S')} Task stopped by user."
                 info["progress_msg"] = (doc.progress_msg or "") + cancel_doc_msg
-                logging.debug("Appended cancellation marker to progress_msg on cancel for doc %s", doc_id)
+                logging.debug("在取消文档 %s 时将取消标记附加到 progress_msg", doc_id)
             else:
                 return RetCode.DATA_ERROR, "Cannot cancel a task that is not in RUNNING status"
-        if all([rerun_with_delete, str(doc.run) == TaskStatus.DONE.value]): # 如果任务全都完成了. 则重置计数器
+        if all([rerun_with_delete, str(doc.run) == TaskStatus.DONE.value]):  # 如果任务全都完成了. 则重置计数器
             DocumentService.clear_chunk_num_when_rerun(doc_id)
         # 写入Mysql的document表
         DocumentService.update_by_id(doc_id, info)
@@ -1611,7 +1573,7 @@ def _run_sync(user_id: str, req):
             # 后续状态由 task_executor 通过 TaskService.update_progress() 持续写回 MySQL。
             DocumentService.run(doc_tenant_id, doc_dict, kb_table_num_map)
             logging.info(
-                "document_ingest_dispatched doc_id=%s kb_id=%s tenant_id=%s parser_id=%s pipeline_id=%s",
+                "文档解析任务已投递 文档ID=%s 知识库ID=%s 租户ID=%s 解析器ID=%s 使用流水线=%s",
                 doc.id,
                 doc.kb_id,
                 doc_tenant_id,
@@ -1673,11 +1635,11 @@ async def parse_documents(tenant_id, dataset_id):
     if len(document_ids) == 0:
         return get_error_data_result(message="`document_ids` is required")
 
-    # Check for duplicate document IDs
+    # 检查重复文档 IDs
     unique_doc_ids, duplicate_messages = check_duplicate_ids(document_ids, "document")
     errors = duplicate_messages if duplicate_messages else []
 
-    # Validate all document IDs belong to the dataset
+    # 验证属于数据集的所有文档 IDs
     not_found_ids = []
     valid_doc_ids = []
     for doc_id in unique_doc_ids:
@@ -1689,7 +1651,7 @@ async def parse_documents(tenant_id, dataset_id):
 
     if not_found_ids:
         errors.append(f"Documents not found: {not_found_ids}")
-        # Still parse valid documents, but return error code
+        # 仍然解析有效文档，但返回错误代码
         if not valid_doc_ids:
             return get_error_data_result(message=f"Documents not found: {not_found_ids}")
 
@@ -1705,7 +1667,7 @@ async def parse_documents(tenant_id, dataset_id):
                     continue
 
                 info = {"run": str(TaskStatus.RUNNING.value), "progress": 0}
-                # If re-running a completed document, clear previous chunks
+                # 如果重新运行已完成的文档，请清除以前的块
                 if str(doc.run) == TaskStatus.DONE.value:
                     DocumentService.clear_chunk_num_when_rerun(doc.id)
                     info["progress_msg"] = ""
@@ -1789,11 +1751,11 @@ async def stop_parse_documents(tenant_id, dataset_id):
     if len(document_ids) == 0:
         return get_error_data_result(message="`document_ids` is required")
 
-    # Check for duplicate document IDs
+    # 检查重复文档 IDs
     unique_doc_ids, duplicate_messages = check_duplicate_ids(document_ids, "document")
     errors = duplicate_messages if duplicate_messages else []
 
-    # Validate all document IDs belong to the dataset
+    # 验证属于数据集的所有文档 IDs
     not_found_ids = []
     valid_doc_ids = []
     for doc_id in unique_doc_ids:
@@ -1816,7 +1778,7 @@ async def stop_parse_documents(tenant_id, dataset_id):
                     errors.append(f"Document not found: {doc_id}")
                     continue
 
-                # Check if the document is currently running
+                # 检查文档当前是否正在运行
                 tasks = list(TaskService.query(doc_id=doc_id))
                 has_unfinished_task = any((task.progress or 0) < 1 for task in tasks)
                 if str(doc.run) not in [TaskStatus.RUNNING.value, TaskStatus.CANCEL.value] and not has_unfinished_task:
@@ -1824,14 +1786,14 @@ async def stop_parse_documents(tenant_id, dataset_id):
                     continue
 
                 cancel_all_task_of(doc_id)
-                # Release the document's partial chunk/token counts from the
-                # knowledgebase aggregate under the row lock (see
-                # release_reparse_counters). This is the sole counter adjustment,
-                # so the status update below must not touch chunk_num.
+                # 从文档中释放部分chunk/token计数
+                # 行锁下的知识库聚合（参见
+                # release_reparse_counters）。这是唯一的计数器调整，
+                # 因此下面的状态更新不得触及 chunk_num。
                 try:
                     release_reparse_counters(doc_id)
                 except LookupError:
-                    logging.exception("Failed to release counters for document %s during stop-parse", doc_id)
+                    logging.exception("在停止解析期间无法释放文档 %s 的计数器", doc_id)
                     errors.append(f"Document not found: {doc_id}")
                     continue
                 cancel_doc_msg = f"\n{datetime.now().strftime('%H:%M:%S')} Task stopped by user."
@@ -1843,7 +1805,7 @@ async def stop_parse_documents(tenant_id, dataset_id):
                         "progress_msg": (doc.progress_msg or "") + cancel_doc_msg,
                     },
                 )
-                logging.debug("Appended cancellation marker to progress_msg on stop-parse for doc %s", doc_id)
+                logging.debug("在文档 %s 的停止解析上将取消标记附加到 progress_msg", doc_id)
                 index_name = search.index_name(tenant_id)
                 if settings.docStoreConn.index_exist(index_name, doc.kb_id):
                     settings.docStoreConn.delete({"doc_id": doc.id}, index_name, doc.kb_id)
@@ -1864,18 +1826,17 @@ async def stop_parse_documents(tenant_id, dataset_id):
 
 
 def _parse_document_image_id(image_id: str) -> tuple[str, str] | None:
-    """Split a composite document image ID into storage bucket and object key.
+    """将复合文档图像 ID 拆分为存储桶和对象密钥。
 
-    Thumbnail URLs use ``{dataset_id}-{thumbnail}``. Only the first hyphen
+    缩略图 URLs 使用``{dataset_id}-{thumbnail}``. Only the first hyphen
     separates the dataset/kb id (bucket) from the object key, which may
     contain additional hyphens (e.g. ``page-1.png``).
 
     Args:
-        image_id: Path segment from ``GET /documents/images/<image_id>``.
+        image_id: Path segment from `ZXQKEEP00 760006ZXQ`.
 
     Returns:
-        ``(bucket, object_key)`` when valid, otherwise ``None``.
-    """
+        ``(bucket, object_key)`` when valid, otherwise ``None``。"""
     parts = image_id.split("-", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         return None
@@ -1962,7 +1923,7 @@ ARTIFACT_CONTENT_TYPES = {
 
 @DB.connection_context()
 def _sandbox_artifact_dialog_ids_for_user(filename: str, user_id: str) -> list[str]:
-    """Return agent dialog IDs for sessions owned by *user_id* that reference *filename*."""
+    """返回代理对话框 IDs，用于引用 *文件名* 的 *user_id* 拥有的会话。"""
     if not filename:
         return []
     artifact_ref = f"documents/artifact/{filename}"
@@ -1978,7 +1939,7 @@ def _sandbox_artifact_dialog_ids_for_user(filename: str, user_id: str) -> list[s
 
 
 def _sandbox_artifact_accessible(filename: str, user_id: str) -> bool:
-    """True when a CodeExec sandbox artifact belongs to an agent session the user may access."""
+    """当 CodeExec 沙箱工件属于用户可以访问的代理会话时，为 true。"""
     for dialog_id in _sandbox_artifact_dialog_ids_for_user(filename, user_id):
         if UserCanvasService.accessible(dialog_id, user_id):
             return True
@@ -2026,7 +1987,7 @@ async def get_artifact(filename):
 
     try:
         bucket = SANDBOX_ARTIFACT_BUCKET
-        # Validate filename: must be uuid hex + allowed extension, nothing else
+        # 验证文件名：必须是 uuid 十六进制 + 允许的扩展名，没有其他
         basename = os.path.basename(filename)
         if basename != filename or "/" in filename or "\\" in filename:
             return get_data_error_result(message="Invalid filename.")
@@ -2107,7 +2068,7 @@ async def batch_update_document_status(tenant_id, dataset_id):
     if status not in ["0", "1"]:
         return get_error_argument_result(message=f'"Status" must be either 0 or 1:{status}!')
 
-    # Verify dataset ownership
+    # 验证数据集所有权
     if not KnowledgebaseService.query(id=dataset_id, tenant_id=tenant_id):
         return get_error_data_result(message="you don't own the dataset")
 
@@ -2174,12 +2135,11 @@ async def batch_update_document_status(tenant_id, dataset_id):
 @manager.route("/documents/<doc_id>/preview", methods=["GET"])  # noqa: F821
 @login_required(auth_types=[AUTH_JWT, AUTH_API, AUTH_BETA])
 async def get(doc_id):
-    """Return the raw file bytes for a document the requesting user is authorized to read.
+    """返回请求用户有权读取的文档的原始文件字节。
 
-    The user must belong to the tenant that owns the document's knowledge base; otherwise
-    the response is indistinguishable from a missing document to avoid cross-tenant ID
-    enumeration.
-    """
+    用户必须属于拥有该文档知识库的租户；否则
+    响应与丢失的文档无法区分，以避免跨租户 ID
+    枚举。"""
     try:
         if not DocumentService.accessible(doc_id, current_user.id):
             return get_data_error_result(message="document not found")
@@ -2262,13 +2222,13 @@ async def download(dataset_id, document_id):
     doc = DocumentService.query(kb_id=dataset_id, id=document_id)
     if not doc:
         return get_error_data_result(message=f"The dataset not own the document {document_id}.")
-    # The process of downloading
-    doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio address
+    # 下载过程
+    doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio地址
     file_stream = settings.STORAGE_IMPL.get(doc_id, doc_location)
     if not file_stream:
         return construct_json_result(message="This file is empty.", code=RetCode.DATA_ERROR)
     file = BytesIO(file_stream)
-    # Use send_file with a proper filename and MIME type
+    # 使用具有正确文件名和 MIME 类型的 send_file
     return await send_file(
         file,
         as_attachment=True,
@@ -2322,13 +2282,13 @@ async def download_document(document_id):
     doc = DocumentService.query(id=document_id)
     if not doc:
         return get_error_data_result(message=f"The dataset not own the document {document_id}.")
-    # The process of downloading
-    doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio address
+    # 下载过程
+    doc_id, doc_location = File2DocumentService.get_storage_address(doc_id=document_id)  # minio地址
     file_stream = settings.STORAGE_IMPL.get(doc_id, doc_location)
     if not file_stream:
         return construct_json_result(message="This file is empty.", code=RetCode.DATA_ERROR)
     file = BytesIO(file_stream)
-    # Use send_file with a proper filename and MIME type
+    # 使用具有正确文件名和 MIME 类型的 send_file
     return await send_file(
         file,
         as_attachment=True,
