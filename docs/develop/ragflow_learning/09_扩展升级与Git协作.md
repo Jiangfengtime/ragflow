@@ -23,7 +23,7 @@ sidebar_label: 09. 扩展、升级与 Git 协作
 | 新 Agent 组件 | `agent/component/` 与前端节点注册 | Canvas 核心写组件特例 |
 | 新前端请求 | Hook + service + request 层 | 组件中重复 fetch |
 
-原则是让新实现遵守现有抽象，而不是在相邻层建立第二条兼容路径。
+先确定行为的拥有者，再在该抽象内完成实现与验证。
 
 ## 2. 新增一个 API 的完整清单
 
@@ -52,7 +52,7 @@ rg '新接口片段' web/src api
 - `rag/app/` 负责面向业务的切片策略，如 paper、manual、table、naive；
 - `deepdoc/` 负责 PDF/OCR/版面/表格等底层解析；
 - `ParserType` 是 Document/Knowledgebase 保存的高层策略枚举；
-- `rag/app/naive.py:PARSERS` 等映射负责具体文件类型选择。
+- `chunk_builder.get_parser` 选择高层策略；`naive.chunk` 根据后缀分支选择文件解析器，其中 `naive.PARSERS` 专门参与 PDF 解析方式分派。
 
 不要把“新增一种文件后缀”和“新增一种业务切片策略”混为一谈。
 
@@ -61,16 +61,16 @@ rg '新接口片段' web/src api
 1. 明确输入格式、输出 Chunk schema 和是否需要 OCR。
 2. 若是新高层策略，扩展 `ParserType`。
 3. 实现 `rag/app/<parser>.py` 的入口约定。
-4. 注册到 Task Executor/Chunk Service 使用的 factory。
+4. 注册到当前 `rag/svr/task_executor_refactor/chunk_builder.py::get_parser` 使用的 factory，并检查实际启用的其他任务路径。
 5. 在上传阶段补充后缀到 parser 的推断。
 6. 明确 PDF/表格是否需要 Task 拆分。
 7. 保留页码、bbox、标题层级和图片等 provenance。
 8. 测试空文件、损坏文件、超大文件、取消和重试。
 9. 比较 Chunk 数、token 分布和真实检索质量。
 
-### 3.3 Chunk 输出最低要求
+### 3.3 从解析输出到最终 Chunk
 
-至少关注：
+完整摄取后的 Chunk 至少关注：
 
 - 稳定 `id`；
 - `doc_id`、`kb_id`；
@@ -78,8 +78,10 @@ rg '新接口片段' web/src api
 - 页码/位置；
 - token 数；
 - 图片或对象引用；
-- metadata；
+- 关联的文档 metadata（由独立元数据索引保存）；
 - Embedding 字段。
+
+这些字段不全由 parser 直接生成。底层 parser 提供正文、页码/bbox、图片等信息；`rag/app/` 完成切片与分词，Chunk Service 包装 `id/doc_id/kb_id`，后处理按配置生成关键词、问题和元数据，Embedding 阶段写入向量。关键词与问题跟随 Chunk 入索引；生成的临时 `metadata_obj` 汇总后由 `DocMetadataService` 写入文档元数据索引，不是每个 Chunk 都长期保留该字段。扩展时先确认字段在哪一层生成，避免在 parser 中复制后续阶段逻辑。
 
 只让 parser “不报错”不代表可用于 RAG，必须验证引用能回到原页、表格语义没有被破坏、检索能够命中。
 
@@ -99,6 +101,8 @@ rg '新接口片段' web/src api
 10. Embedding 维度及数据重建影响。
 
 Embedding 模型一旦用于已有知识库，切换模型不能只改配置。旧 Chunk 向量属于旧语义空间，通常需要重新解析或至少重新 Embedding 并重建索引。
+
+当前供应商配置的具体入口为 `api/apps/restful_apis/provider_api.py` → `api/apps/services/provider_api_service.py` → `TenantModelProvider/Instance/Model`。实例的 `api_key` 和 `extra.base_url` 最终由 `api/db/joint_services/tenant_model_service.py` 解析为适配器配置。新增供应商必须检查实例创建、连接验证、模型发现、能力 bit flags 和实际运行调用，单纯向 `llm_factories.json` 添加目录条目并不能完成支持。
 
 ## 5. 新增 Doc Store
 
@@ -259,6 +263,8 @@ git diff
 - 文档路径和符号仍存在；
 - 测试与实现处于同一提交或清晰的连续提交中。
 
+维护者接手社区 PR 时，若通过合并或 rebase 生成了重写后的提交，应保留原作者，并通过 `Co-authored-by:` trailer 添加维护者；不能把原作者直接替换为维护者。
+
 ## 12. 从上游吸收更新
 
 长期维护分支建议：
@@ -284,12 +290,14 @@ git rebase origin/main
 1. MySQL 全量备份；
 2. MinIO 数据或数据卷快照；
 3. `conf/local.service_conf.yaml`；
-4. `docker/docker-compose.local.yml`；
+4. `docker/docker-compose.local.yml` 与实际使用的 `.env`；
 5. `web/.env.development.local`；
 6. 自己的 Git 提交和分支；
-7. 必要时 ES 数据，尤其是重建成本高时。
+7. 实际 Doc Store 的快照或导出，包含 Chunk、文档元数据和记忆消息等数据。
 
-MySQL 和 MinIO 是最关键的恢复基础。ES 理论上可重建，但可能产生大量时间与模型费用。
+关系库和对象存储保存主要业务记录与原始文件。普通文档 Chunk 可重新解析、Embedding 后重建，但会产生时间与模型费用；手工文档元数据、记忆消息等检索存储内容不能保证由原文件恢复，必须纳入备份范围。
+
+Redis 中除任务队列外，还可能保存自动生成的系统签名密钥等运行状态，应记录密钥来源及恢复方式。仓库的 `docker/migration.sh` 支持按 Compose project name 备份/恢复 `mysql_data`、`minio_data`、`redis_data`、`esdata01` 四个卷；它要求停止使用这些卷的容器。Infinity、OpenSearch 等实际使用的索引卷不在这四个固定目标中，须单独备份。脚本的 restore 会改写目标卷，执行前核对项目名、卷名和备份内容。
 
 ## 14. 升级到后续版本的标准流程
 
@@ -303,7 +311,7 @@ MySQL 和 MinIO 是最关键的恢复基础。ES 理论上可重建，但可能�
 - 数据库迁移；
 - 索引 mapping 变化；
 - 是否要求重新解析或重新 Embedding；
-- 已废弃接口和前端环境变量。
+- 当前接口和前端环境变量变化。
 
 ### 14.2 停止写入
 
@@ -328,10 +336,11 @@ Git commit/tag
 
 ```bash
 git fetch origin --tags
-git switch -c codex/upgrade-v0.27.2 v0.27.2
+git tag --list 'v*'
+git switch -c codex/upgrade-check TARGET_TAG
 ```
 
-若要把升级合并进长期学习分支，则在学习分支 rebase/merge 相应上游提交，并逐项解决冲突。
+先把 `TARGET_TAG` 替换为已存在且已确认的目标 tag。切换前处理当前未提交改动；若要把升级合并进长期学习分支，则在学习分支 rebase/merge 相应上游提交，并逐项解决冲突。
 
 ### 14.5 更新依赖
 
@@ -344,7 +353,7 @@ npm install
 cd ..
 ```
 
-Go 原生依赖和构建以新版本 `build.sh` 为准。
+Go 版本先检查目标 `go.mod`，原生依赖和构建以目标版本 `build.sh` 为准。当前 checkout 的 `go` 指令为 `1.26.4`，不能仅按开发说明中的工具安装示例决定版本。
 
 ### 14.6 更新基础服务
 
@@ -360,11 +369,38 @@ docker compose \
   up -d --wait
 ```
 
-不要添加 `-v`，否则会删除命名卷。升级前仍必须有独立备份。
+若停止服务时使用 `docker compose down`，不要加 `-v`；该选项会删除命名卷。`pull`/`up` 不负责备份，升级前仍必须有独立备份。
 
 ### 14.7 执行迁移
 
-当前代码在数据库初始化中包含 schema 检查和迁移逻辑，仓库也可能提供独立迁移脚本。必须以目标版本发布说明和目标版本代码为准。迁移前先在备份副本或测试环境演练。
+当前源码有三个不同的迁移入口，必须先识别目标数据库和启动方式：
+
+| 入口 | 做什么 | 配置与范围 |
+|---|---|---|
+| Python `init_database_tables()` → `migrate_db()` | 创建缺失表，调整列与索引 | 使用 Peewee 当前绑定的 `DB` |
+| `tools/scripts/run_migrations.sh` → `mysql_migration.py` | provider/instance/model 建表、数据填充、能力合并与模型 ID 更新 | MySQL SQL；配置路径是脚本第一个位置参数 |
+| Go `--migrate` → `dao.InitDB()` | GORM AutoMigrate 与 `RunMigrations()` | Go 进程读取的配置；不能代替模型数据填充脚本 |
+
+`run_migrations.sh` 依次运行两个版本门槛：`v0.26.0` 的 `tenant_model_provider,tenant_model_instance,tenant_model,model_id_config`，以及 `v0.27.1` 的 `tenant_model_seeding,model_type_merge,tenant_model_id_migration`。完整成功才写入 `mysql_migration.database.version` 标记。这个标记是脚本的执行门槛，验证时仍要检查实际表、默认模型 ID 和实例关联。
+
+先查看阶段清单并在备份副本演练。下面第二条命令默认 dry-run，不含 `--execute`：
+
+```bash
+uv run python tools/scripts/mysql_migration.py --list-stages
+uv run python tools/scripts/mysql_migration.py \
+  --config conf/local.service_conf.yaml \
+  --stages tenant_model_provider,tenant_model_instance,tenant_model,model_id_config
+```
+
+确认目标连接和演练结果后，执行 MySQL 的完整两阶段脚本：
+
+```bash
+PY=.venv/bin/python3 bash tools/scripts/run_migrations.sh conf/local.service_conf.yaml
+```
+
+这里的配置文件必须具有完整的 `database` 或 `mysql` 块。迁移脚本只读取传入的单个 YAML，不执行 `common/config_utils.py` 的默认文件与本地文件合并，也不能假设它复用应用的凭据解密流程。参数不匹配时可能连接错误端口或数据库。
+
+本机 `start_local.sh` 直接启动 Python API 与 Worker，未调用两阶段脚本；`docker/launch_backend_service.sh` 在启动 API 前自动调用建表及模型迁移；`docker/entrypoint.sh` 默认只在 Web Server 启动前建表，需要显式 `--init-model-provider-tables` 才会运行两阶段脚本。两个 Docker 目录脚本当前只对 `DB_TYPE=gaussdb/gauss` 跳过 MySQL 脚本；PostgreSQL 等其他元数据库应按其实际支持的迁移路径处理，不能把 MySQL 数据脚本直接套用。迁移前以目标版本代码为准，并在测试环境确认配置和数据关联。
 
 ### 14.8 冒烟验证
 
@@ -434,4 +470,4 @@ rg 'class TaskHandler|def queue_tasks|class Dealer' api rag
 - 能为检索修改建立可重复评测，而不是只看主观样例。
 - 能维护 origin/personal 双远端和长期学习分支。
 - 能完成带备份、迁移、冒烟测试和回滚方案的版本升级。
-- 能在上游重构后删除重复兼容路径并更新文档。
+- 能在上游重构后删除重复实现并更新文档。

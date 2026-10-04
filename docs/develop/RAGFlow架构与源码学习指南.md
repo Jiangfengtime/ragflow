@@ -10,7 +10,7 @@ sidebar_custom_props: {
 
 # RAGFlow 架构与源码学习指南
 
-本文面向希望从“能够启动”进一步走到“能够解释、调试和修改 RAGFlow”的开发者。内容以当前仓库 `v0.27.1` 的源码为准，重点解释 Python 主链路，同时说明正在演进的 Go 实现、前端结构、数据存储及推荐的源码阅读顺序。
+本文面向希望从“能够启动”进一步走到“能够解释、调试和修改 RAGFlow”的开发者。内容以本地当前源码为准（`pyproject.toml` 声明 `0.27.1`，包含工作区修改），重点解释 Python 主链路，同时说明 Go 实现、前端结构、数据存储及推荐的源码阅读顺序。本轮源码核对日期：2026-10-04；这不是对后续上游版本行为的保证。
 
 运行环境、MinIO 的职责、macOS 启停及版本升级步骤，参见配套文档：[macOS 源码开发与版本升级](./macOS源码开发与版本升级.md)。
 
@@ -36,6 +36,9 @@ sidebar_custom_props: {
 | [第十五册：智能体产品、版本与运行链路](./ragflow_learning/15_智能体产品版本与运行链路.md) | Canvas 创建、版本、发布、会话、运行、日志、工具和 Webhook |
 | [第十六册：记忆的提取、存储与召回](./ragflow_learning/16_记忆提取存储与召回.md) | 记忆类型、异步提取、独立索引、混合召回和 Agent 集成 |
 | [第十七册：文件管理、知识库链接与版本](./ragflow_learning/17_文件管理知识库链接与版本.md) | 目录树、对象存储、File2Document、版本、下载和删除 |
+| [第十八册：知识库文档删除核心方法流程图](./ragflow_learning/18_知识库文档删除核心方法流程图.md) | 删除接口、服务方法、派生数据清理与失败边界的逐方法流程图 |
+| [第十九册：知识库文档核心流程图](./ragflow_learning/19_知识库文档核心流程图.md) | 导入、Task、解析、Embedding、文件列表与检索的逐方法流程图 |
+| [第二十册：SDK、连接器与质量验证](./ragflow_learning/20_SDK连接器与质量验证.md) | SDK/REST 异步契约、连接器同步与解析/召回验收 |
 
 总览用于建立地图，分册用于逐模块精读和动手实验。两者不是重复关系。
 
@@ -146,7 +149,7 @@ Docker: MySQL + Redis + MinIO + Elasticsearch
 | Python Worker | `rag/svr/task_executor.py` | 消费文档任务，解析、向量化并建立索引 |
 | 前端 | `web/src/main.tsx` | 初始化语言和后端类型，渲染 React 应用 |
 
-本机已经验证过的完整命令、端口与健康检查以 [macOS 源码开发与版本升级](./macOS源码开发与版本升级.md) 为准。
+本机命令、端口与健康检查见 [macOS 源码开发与版本升级](./macOS源码开发与版本升级.md)。日常运行用 `./start_local.sh`；IDE 调试先用 `./start_debug.sh` 准备依赖/前端，再分别 Debug API 与 Worker。不要同时让脚本和 IDE 启动重复后端。
 
 ### 4.2 Python API 启动过程
 
@@ -156,7 +159,7 @@ Docker: MySQL + Redis + MinIO + Elasticsearch
 settings.init_settings()
   -> 加载关系库、对象存储、Doc Store、模型等配置
 init_web_db()
-  -> 建立数据库连接及必要结构
+  -> init_database_tables 的导入别名，创建表并执行 schema 调整
 init_web_data()
   -> 初始化基础业务数据
 RuntimeConfig.init_env()
@@ -168,6 +171,8 @@ app.run(...)
 ```
 
 `api/apps/__init__.py` 创建 Quart 应用，配置 CORS、Session 和认证，并动态扫描多个 `_app.py` 与 `restful_apis/*.py` 注册路由。因此，查找接口时应搜索 URL 片段、HTTP 装饰器或函数名，而不是期待一个手写的总路由表。
+
+关系库配置及 Peewee 的 `DB` 对象在导入期已构造，`DataBaseModel.Meta.database` 让子模型继承绑定；`init_web_db` 不是所有数据源绑定的起点。进度同步和聊天渠道等还由后台线程执行。配置、建表与额外模型数据迁移的区别见第一、九册。
 
 ### 4.3 Go 服务模式
 
@@ -191,21 +196,22 @@ Python 配置入口是 `common/config_utils.py`：
 ```text
 conf/service_conf.yaml
   -> 再用 conf/local.service_conf.yaml 覆盖
-  -> 环境变量占位符与运行配置参与解析
 ```
 
 本地覆盖是顶层配置块的浅覆盖。若在 `local.service_conf.yaml` 中定义 `mysql:`，应写全本机实际需要的 MySQL 子项，避免误以为它会逐字段深度合并。
 
+Python 的 `read_config` 不自动替换 YAML 内的环境变量占位符；应用的 `os.getenv` 设置与 YAML 加载是不同步骤。Docker 模板中的环境变量替换由 `docker/entrypoint.sh` 执行，不能把容器模板处理等同于源码启动时的配置解析。
+
 `common/settings.py::init_settings()` 是理解基础设施装配最重要的函数之一，它会：
 
-1. 选择 MySQL 或 PostgreSQL 等元数据库；
+1. 重新加载 `DB_TYPE` 对应的元数据库设置（ORM 的 DB 绑定还涉及导入期初始化）；
 2. 选择 Elasticsearch、Infinity、OpenSearch、OceanBase、SeekDB、GaussDB 或 SereneDB 等 Doc Store；
 3. 选择 MinIO、S3、OSS、Azure、GCS 或 OpenDAL 等对象存储；
 4. 创建全局 `STORAGE_IMPL`、`docStoreConn`、`retriever` 和 `kg_retriever` 等对象。
 
 ### 5.2 两个关键抽象
 
-对象存储通过 `settings.STORAGE_IMPL` 使用。业务代码只关心 `put/get/remove` 等能力，不应直接绑定 MinIO 客户端。
+对象存储通过 `settings.STORAGE_IMPL` 使用。业务代码常用 `put/get/rm/obj_exist`，不应直接绑定 MinIO 客户端。
 
 检索存储通过 `common/doc_store/doc_store_base.py::DocStoreConnection` 抽象。它统一定义索引创建、搜索、插入、更新、删除和结果读取，并用下列表达式描述查询：
 
@@ -231,7 +237,8 @@ User ──< UserTenant >── Tenant
                         │               └── File2Document >── File
                         │
                         ├──< Dialog ──< Conversation
-                        ├──< TenantLLM / ModelProvider / ModelInstance
+                        ├──< TenantModelProvider ──< TenantModelInstance
+                        │         └──< TenantModel >──┘
                         └──< UserCanvas / Memory / API Token
 ```
 
@@ -248,8 +255,12 @@ User ──< UserTenant >── Tenant
 | `Dialog` | 聊天助手配置，包括知识库、模型、阈值和提示词 |
 | `Conversation` | 具体会话与消息历史 |
 | `UserCanvas` | Agent/Dataflow 的图 DSL |
+| `Search` | 保存搜索应用配置，不保存每次查询结果 |
+| `Memory` | 保存记忆库配置，消息写独立 Memory Store |
 
 不要把 `Document` 与检索引擎中的“切片文档”混为一谈。前者是一条业务记录，后者通常是一组以 chunk ID 为主键的索引记录。
+
+`Tenant`、`Knowledgebase` 的 `tenant_*_id` 指向 `tenant_model.id`。模型名来自 TenantModel，API Key 来自 TenantModelInstance，base URL 通常来自实例 `extra` JSON；经 `tenant_model_provider.tenant_id` 校验租户归属后组装运行配置。`instance_name` 不等于模型名，掩码展示也不是加密存储。
 
 ## 7. 文档摄取：最值得先读通的调用链
 
@@ -270,6 +281,8 @@ HTTP 上传
 
 此时通常只是“文件已存在”，尚未生成可检索向量。
 
+标准本地上传会先保存原文件和可选缩略图，再写 Document/File 关系；Document 的解析配置来自知识库上传时快照，可叠加允许的上传覆盖参数。勾选“上传后解析”由前端另发 ingest 请求，并非上传方法自动生成 Embedding。
+
 ### 7.2 创建与分发任务
 
 解析入口包括：
@@ -284,7 +297,7 @@ HTTP 上传
 3. 更新 `Document` 的运行状态和进度；
 4. 通过 `REDIS_CONN.queue_product(...)` 发布任务。
 
-大文档被拆成多个 Task，是并发、断点处理和进度汇总的基础。调试“任务一直等待”时，应同时检查 MySQL 的任务状态、Redis 队列和 Worker 日志。
+大文档被拆成多个 Task，是并发、结果复用和进度汇总的基础，但不保证逐 Chunk 精确续跑。Task 表不存 parser_config；Worker 通过 Task → Document → Knowledgebase → Tenant 联表取得配置。PDF 通常每 12 页拆任务，跨 Task 不自动补 overlap，原文件仍完整读取。调试“任务一直等待”时，应同时检查 MySQL、Redis 和 Worker。
 
 ### 7.3 Worker 消费与解析
 
@@ -293,13 +306,18 @@ HTTP 上传
 ```text
 collect()
   -> 从 Redis 取消息并加载 Task
-build_chunks()
+TaskManager.run_refactored_task()
+  -> TaskContext：装配配置、限流器和进度/取消回调
+TaskHandler.handle_task() -> handle()
+  -> 按 task_type 分派；标准文档绑定 Embedding 并检查索引
+_run_standard_chunking_impl()
   -> 根据 File2Document 找到对象地址
   -> STORAGE_IMPL.get() 读取原始文件
-  -> FACTORY[parser_id].chunk() 解析和切片
+ChunkService.build_chunks()
+  -> get_parser(parser_id) -> run_chunking -> chunker.chunk()
 内容增强
   -> 分词、关键词、问题、元数据、位置等字段
-embedding()
+EmbeddingService.embed_chunks()
   -> Embedding 模型批量编码
   -> 生成 q_<维度>_vec 字段
 insert_chunks()
@@ -308,7 +326,9 @@ insert_chunks()
   -> 切片数、Token 数、进度和最终状态
 ```
 
-`FACTORY` 将数据集的 `parser_id` 映射到 `rag/app/*.py`。这里是为不同文档语义选择切片策略的第一入口。
+这是默认 `TE_RUN_MODE=0` 路径。当前 `chunk_builder.get_parser` 将 `general/naive` 等策略映射到 `rag/app/*.py`；不要在默认 Debug 时只追 `task_executor.py` 中另一执行分支的同名 `build_chunks/embedding/insert_chunks`。
+
+`build_chunks` 不生成向量或写普通 Chunk 索引，但可保存图片、大纲和独立文档元数据。关键词/问题增强的开关、字段和模型调用见[第二册第 11 节](./ragflow_learning/02_文档摄取与深度解析.md#11-内容增强)。默认 `recording_context.record` 为无操作，不是日志或数据库写入。
 
 ### 7.4 `rag/app` 与 `deepdoc` 的分层
 
@@ -347,6 +367,32 @@ deepdoc/parser/*.py + deepdoc/vision/*
 
 `rag/nlp/search.py::index_name(uid)` 默认产生 `ragflow_<tenant_id>`。索引以租户为主要边界，`kb_id` 和 `doc_id` 再作为过滤条件。
 
+文档级元数据使用 `ragflow_doc_meta_<tenant_id>` 独立索引，列表中的 “fields” 由它提供；原文件/图片仍在对象存储。ES 批量写成功后才周期更新 MySQL `Task.chunk_ids`，它是结果复用/清理账本，不是向量本体。
+
+### 7.6 知识库文件列表查询
+
+知识库文件列表与第 8 章的内容检索是两条链路：
+
+```text
+GET /datasets/<id>/documents
+  -> list_docs -> DocumentService.get_by_kb_id
+  -> MySQL 文档列表 + 独立索引中的文档元数据
+```
+
+此查询不调用大模型。详细的筛选条件、元数据读取和断点见[第十二册第 7.1 节](./ragflow_learning/12_知识库产品完整链路.md#71-查询知识库文件列表)，逐方法流程图见[第十九册](./ragflow_learning/19_知识库文档核心流程图.md)。顶部「文件管理」的目录树查询见[第十七册第 7 节](./ragflow_learning/17_文件管理知识库链接与版本.md#7-目录列表与面包屑)。
+
+### 7.7 知识库文档删除
+
+删除入口与列表查询使用相同 URL，但 HTTP 方法和处理逻辑不同：
+
+```text
+DELETE /datasets/<id>/documents
+  -> delete_documents -> FileService.delete_docs
+  -> 删除 Document、Chunk、文件关联和原文件对象
+```
+
+这是跨 MySQL、检索引擎和对象存储的清理操作，不是一个原子事务。完整删除链路见[第十二册第 7.2 节](./ragflow_learning/12_知识库产品完整链路.md#72-删除知识库文档)，逐方法流程图见[第十八册](./ragflow_learning/18_知识库文档删除核心方法流程图.md)；文件管理器按 `file.id` 删除的流程见[第十七册第 13 节](./ragflow_learning/17_文件管理知识库链接与版本.md#13-删除文件)。
+
 ## 8. 检索链路
 
 检索核心位于 `rag/nlp/search.py::Dealer`。
@@ -359,7 +405,7 @@ deepdoc/parser/*.py + deepdoc/vision/*
 2. `FulltextQueryer` 生成的全文查询；
 3. Embedding 模型产生的查询向量；
 4. `MatchDenseExpr` 发起余弦相似度检索；
-5. `FusionExpr` 融合全文与向量结果；
+5. `FusionExpr` 及后端实现决定第一阶段候选打分；
 6. 根据后端能力执行 Elasticsearch、Infinity 等不同实现。
 
 ### 8.2 召回与重排
@@ -386,17 +432,20 @@ deepdoc/parser/*.py + deepdoc/vision/*
 
 几个配置不要混为一谈：
 
-- `top_k`：向量候选池规模；
-- `top_n`：最终送给后续流程的结果规模；
+- `knn_top_k`：向量候选规模；`knn_num_candidates`：近似检索探索规模；
+- `rerank_candidates_count`：取回应用层重排的候选窗口；
+- 应用 `top_n` / retrieval 的 `page_size`：最终结果规模，需沿调用入口看映射；
 - `similarity_threshold`：最低相似度门槛；
 - `vector_similarity_weight`：语义向量相对于词法匹配的权重；
 - `rerank_mdl`：可选的专用重排模型。
 
 排查“明明有内容却搜不到”时，按过滤条件、切片是否已索引、查询分词、Embedding 模型一致性、候选池、阈值、重排依次缩小范围。
 
+当前默认 ES 的最终文本项是 Python `token_similarity`，不是直接采用首轮 BM25 分；候选还可能经过 ID 限定的第二次 KNN，返回引擎 `_score`，代码不将其还原为原始 cosine。用户向量权重不等于首轮 ES 两路完整归一化权重，设为 0 也不保证不调用向量模型。准确 DSL 和计算边界见第三册。
+
 ## 9. 聊天与 RAG 生成链路
 
-REST 入口位于 `api/apps/restful_apis/chat_api.py::session_completion`，主要服务逻辑位于 `api/db/services/dialog_service.py::async_chat`。
+REST 入口之一位于 `api/apps/restful_apis/chat_api.py::session_completion`。`dialog_service.rag_agent` 根据 reasoning 分流：普通路径是 `async_chat`，推理路径是 RAGTools 驱动的多轮工具执行。以下描述普通 RAG 路径。
 
 ```text
 聊天请求
@@ -427,7 +476,7 @@ REST 入口位于 `api/apps/restful_apis/chat_api.py::session_completion`，主�
 
 ### 9.2 引用不是简单显示检索结果
 
-引用处理发生在生成答案之后。若模型没有产生可识别的引用标记，代码会按需取得切片向量，通过 `Dealer.insert_citations()` 将答案片段与知识切片匹配，再返回实际引用。因而“答案正确但引用不对”要同时检查检索结果、提示词引用要求和生成后的引用匹配。
+引用由 `quote` 等配置控制，既涉及生成提示，也涉及生成后检查。若没有可识别标记，代码可通过 `Dealer.insert_citations` 匹配答案与切片。`reference.chunks` 不一定只剩实际引用的块；流式最终事件也不等于重新发送整篇带引用正文。因此“答案正确但引用不对”要同时查召回、Prompt、生成后匹配和前端事件处理，见第三、十三册。
 
 ## 10. Agent Canvas
 
@@ -478,8 +527,7 @@ Agent 的核心不是一个无限循环的聊天函数，而是一份图 DSL 及
 
 ```text
 web/src/main.tsx
-  -> 初始化国际化
-  -> 请求 /api/v1/language 判断后端语言
+  -> 并行等待国际化初始化与 /api/v1/language 后端探测
   -> 渲染 App
 web/src/app.tsx
   -> QueryClient、主题、提示框、RouterProvider
@@ -561,9 +609,9 @@ bash build.sh --go
 
 1. `document_api.py::upload_document`；
 2. `DocumentService.run`；
-3. `task_executor.py::build_chunks`；
-4. `task_executor.py::embedding`；
-5. `task_executor.py::insert_chunks`；
+3. `task_handler.py::_run_standard_chunking_impl`；
+4. `ChunkService.build_chunks`、`EmbeddingService.embed_chunks`；
+5. `ChunkService.insert_chunks`、实际 `docStoreConn.insert`；
 6. `search.py::Dealer.retrieval`；
 7. `dialog_service.py::async_chat`。
 
@@ -577,7 +625,7 @@ rg -n 'documents/ingest|chat/completions' api internal
 rg -n 'DocumentService\.run|Dealer\(|async_chat\(' api rag
 
 # 查对象存储读写
-rg -n 'STORAGE_IMPL\.(put|get|remove)' api rag agent
+rg -n 'STORAGE_IMPL\.(put|get|rm)' api rag agent
 
 # 查队列生产与消费
 rg -n 'queue_product|queue_consumer' api rag
@@ -679,7 +727,7 @@ bash build.sh --test-e2e
 
 1. `DocumentService.run` 与任务创建；
 2. `task_executor.py` 的消费循环；
-3. `build_chunks`、`embedding`、`insert_chunks`；
+3. `task_executor_refactor/` 的 `ChunkService`、`EmbeddingService`、`TaskHandler`；
 4. `rag/app/naive.py`；
 5. 它调用的一个 `deepdoc/parser` 实现。
 
@@ -740,6 +788,7 @@ bash build.sh --test-e2e
 7. `api/apps/restful_apis/document_api.py`
 8. `api/db/services/task_service.py`
 9. `rag/svr/task_executor.py`
+   和 `rag/svr/task_executor_refactor/{task_manager,task_handler,chunk_service,embedding_service}.py`
 10. `rag/app/naive.py`
 11. `common/doc_store/doc_store_base.py`
 12. `rag/nlp/search.py`

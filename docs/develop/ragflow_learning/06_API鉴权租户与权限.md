@@ -12,8 +12,8 @@ sidebar_label: 06. API、鉴权、租户与权限
 
 Python API 入口是 `api/ragflow_server.py`，Quart 应用和认证基础设施主要在 `api/apps/__init__.py`。业务接口分散在：
 
-- `api/apps/*_app.py`：较早的页面业务接口；
-- `api/apps/restful_apis/*.py`：REST 风格接口；
+- `api/apps/*_app.py`：页面业务接口；
+- `api/apps/restful_apis/*.py`：REST 风格接口，也是当前 Python SDK 请求的服务端入口；
 - `api/apps/services/*.py`：多个路由复用的业务流程；
 - `api/db/services/*.py`：数据库访问和业务状态更新。
 
@@ -25,6 +25,10 @@ rg 'documents/ingest|datasets/search' api/apps
 ```
 
 不要只看文件名推断 URL。Blueprint 的前缀和应用注册逻辑可能在上层统一添加。
+
+当前 SDK 客户端位于 `sdk/python/ragflow_sdk/`，工作区没有 `api/apps/sdk/` 目录；注册器中的通用扫描模式不代表该目录实际存在。SDK 与 REST 的调用契约见[第二十册](./20_SDK连接器与质量验证.md)。
+
+`register_page()` 对 `restful_apis` 模块使用 `/api/v1`，非 REST 模块使用 `/v1/<page_name>`。以下团队路由的完整路径也都包含 `/api/v1`。定位一条请求时，应同时记录前缀、模块内路径、HTTP 方法和认证类型。
 
 ## 2. 一次请求经过的通用层次
 
@@ -50,17 +54,22 @@ HTTP 请求
 }
 ```
 
-`code` 是 RAGFlow 业务码；HTTP 状态码是传输层状态。`api/utils/api_utils.py` 会把部分内部 `RetCode` 映射为 400、403 或 500，但调用方仍应读取响应体中的 `code` 和 `message`。
+`code` 是 RAGFlow 业务码；HTTP 状态码是传输层状态。`get_json_result()`、`get_result()` 负责响应体，`build_error_result()` 才会把部分内部 `RetCode` 映射为 400、403 或 500。不同接口采用的辅助函数不同，因此业务失败可能仍返回 HTTP 200，调用方必须读取响应体的 `code` 和 `message`。
 
 ## 3. `login_required` 做了什么
 
 `api/apps/__init__.py:login_required` 是路由级认证装饰器。它调用 `_load_user()`，成功后把用户放入请求上下文，再执行真正的路由函数；认证失败则返回错误或抛出未授权异常。
 
-当前代码支持多种认证来源，具体启用范围由路由传入的 `auth_types` 决定。常见来源包括：
+认证范围由路由传入的 `auth_types` 决定；默认是 `JWT` 和 `API`，`BETA` 需显式启用：
 
-- 浏览器登录会话/JWT；
-- `Authorization: Bearer ...` API Token；
-- 部分兼容或公开 API 使用的专用认证类型。
+| 类型 | `_load_user()` 的实际解析 |
+|---|---|
+| `JWT` | 用 `URLSafeTimedSerializer` 解签 Authorization 值，再按 `User.access_token` 查询有效用户 |
+| `API` | 按 `APIToken.token` 查询，再按其 `tenant_id` 加载有效用户 |
+| `BETA` | 按 `APIToken.beta` 查询，用于 bot 等专用路由 |
+| 无 Authorization | 仅在允许 `JWT` 时尝试 Session 的 `_user_id`，并复核用户与 access_token 是否有效 |
+
+这里的 `JWT` 是源码认证类型名，实际实现是 itsdangerous 签名令牌。Authorization 可带大小写不敏感的 `Bearer ` 前缀；已有 Header 但认证失败时，不会继续尝试无 Header 的 Session 分支。排障时应核对具体解析分支，不能只看浏览器是否有 Cookie。
 
 认证回答的是“调用者是谁”，权限校验回答的是“这个调用者能否访问目标资源”。不能因为一个接口有 `@login_required`，就认为它已经完成知识库、文档或租户权限校验。
 
@@ -97,7 +106,7 @@ kwargs["tenant_id"] = current_user.id
 User
   └─< UserTenant >─ Tenant
                     ├─ Knowledgebase
-                    ├─ TenantLLM
+                    ├─ TenantModelProvider → Instance → Model
                     ├─ Dialog / Canvas
                     └─ API Token
 ```
@@ -120,12 +129,12 @@ User
 
 ```text
 团队所有者输入已注册邮箱
-  → POST /tenants/<tenant_id>/users
+  → POST /api/v1/tenants/<tenant_id>/users
   → 校验 current_user.id == tenant_id
   → 查找目标 User
   → 创建 UserTenant(role=INVITE)
   → 异步发送邀请邮件
-  → 被邀请人 PATCH /tenants/<tenant_id>
+  → 被邀请人 PATCH /api/v1/tenants/<tenant_id>
   → role 更新为 NORMAL
 ```
 
@@ -135,6 +144,8 @@ User
 - 邀请创建的是关系记录，不是复制一份用户；
 - 接受邀请后，用户查询可访问租户时会得到多条记录；
 - 移除成员是删除相应 `UserTenant` 关系，不是删除用户账户。
+
+关系写入先于后台邮件任务完成，邮件发送失败不意味着关系已回滚。调试“收到邀请失败”时要分别检查关系、角色和 SMTP 任务日志。
 
 ## 7. 知识库权限
 
@@ -171,41 +182,41 @@ doc_id
 模型供应商密钥不是 `APIToken`：
 
 - `APIToken.token`：调用 RAGFlow API 的凭据；
-- `TenantLLM.api_key`：RAGFlow 调用模型供应商的凭据；
+- `TenantModelInstance.api_key`：当前供应商实例调用模型的凭据；
 - 浏览器 Session/JWT：登录态凭据。
 
 三者不要混用，也不要在日志、截图、提交记录或学习文档中写入真实值。
 
 ## 10. 模型配置与租户隔离
 
-当前仓库同时保留旧模型配置表和新的 provider/instance/model 结构。新接口优先通过新结构解析模型，部分旧 Service 仍使用 `TenantLLM`：
+当前供应商设置与模型运行解析应先阅读 provider/instance/model 结构及 `api/db/joint_services/tenant_model_service.py`：
 
 | 模型 | 作用 |
 |---|---|
 | `LLMFactories` | 供应商目录与能力标签 |
 | `LLM` | 可选模型目录，如名称、类型、最大 Token |
-| `TenantLLM` | 旧结构中的租户供应商、模型、API Key 和 API Base |
-| `TenantModelProvider` | 新结构中的租户供应商记录 |
+| `TenantModelProvider` | 租户供应商记录，同租户内 provider_name 唯一 |
 | `TenantModelInstance` | 供应商实例、实例名、API Key 和扩展配置 |
 | `TenantModel` | 实例下的模型名与能力 bit flags |
-| `Tenant` | 默认 chat/embedding/rerank 等模型指向 |
-| `Knowledgebase` | 数据集实际使用的 Embedding 模型 |
-| `Dialog` | Chat 与 Rerank 等问答配置 |
+| `Tenant` | 默认模型名称及 `tenant_llm_id/tenant_embd_id` 等模型记录 ID |
+| `Knowledgebase` | 数据集 Embedding 的 `embd_id/tenant_embd_id` |
+| `Dialog` | Chat、Rerank 名称及对应 `tenant_*_id` |
 
-`TenantLLM.api_key` 和 `TenantModelInstance.api_key` 都是敏感字段。当前 ORM 将其建模为普通文本/字符字段，页面上的 `masked_key` 只是脱敏展示，不代表数据库字段经过了不可逆加密。调试时只允许检查是否为空、长度或掩码，不应直接查询、打印或提交完整值。数据库备份也应按秘密数据管理。
+模型解析链为：业务模型引用 → `get_model_config_by_id()` / `resolve_model_config()` → Provider 与租户权限 → Instance 凭据及 `extra.base_url` → Model 能力、状态和扩展参数 → `LLMBundle` → 供应商适配器。ID 解析会验证调用方拥有供应商或已加入供应商所属租户，并检查模型能力位；这层权限不能替代对知识库、助手等业务资源的授权。
+
+`TenantLLM` 表和 `TenantLLMService` 中仍存在直接查询方法，但 `LLMBundle` 继承该类的运行包装器，并不能据类名判断当前凭据来自哪张表。应沿调用者传入的 `model_config` 反查 joint service。模型的 `extra` 与实例的 `extra` 也不同：实例保存 endpoint/region，模型保存 `max_tokens/is_tools` 等能力参数。
+
+`TenantLLM.api_key` 和 `TenantModelInstance.api_key` 都是敏感字段，ORM 将其建模为普通文本/字符字段。实例 `api_key` 还可能保存供应商专用的 JSON 凭据，不能假设始终是一个简单字符串。当前 `list_provider_instances()` 不返回 Key，但 `show_provider_instance()` 会把原始 `api_key` 返回给已认证、归属校验通过的实例编辑请求；页面密码控件的隐藏不代表接口或数据库已脱敏。
+
+调试时只检查是否为空、长度或自行生成的掩码，不应打印、截图或提交实例详情响应。数据库备份也应按秘密数据管理；新增无需凭据的接口应显式挑选返回字段。
 
 ## 11. `validate_dataset_embedding_models`
 
 多知识库检索需要验证 Embedding 配置兼容性。因为查询只生成一份向量，而不同 Embedding 模型可能具有不同的语义空间和向量维度；同一查询向量不能直接与不兼容的 Chunk 向量混算。
 
-该验证通常负责：
+`api/db/services/knowledgebase_service.py::validate_dataset_embedding_models(kbs)` 接收已经加载的知识库列表，实际校验两件事：所有数据集都配置 Embedding 或都不配置；配置时，将 `tenant_embd_id`/原始模型 ID 尽力解析为名称，再比较去掉实例和供应商后缀的基础模型名。不满足条件时返回错误字符串，成功时返回 `None`。
 
-1. 读取所有目标知识库；
-2. 确认其 Embedding 模型配置可共同查询；
-3. 解析租户模型实例；
-4. 在不兼容时提前返回明确错误，而不是等 ES 查询时报维度错误。
-
-因此它既是参数校验，也是检索正确性保护。
+这个函数不执行资源授权，不校验供应商凭据，也不调用模型探测向量维度。不同 endpoint 对同名模型的实现若不一致，基础名检查通过仍可能在编码或查询阶段失败；维度与向量字段需继续在 Embedding 输出和 Doc Store mapping 中核对。
 
 ## 12. 前端如何调用 API
 
@@ -249,7 +260,7 @@ doc_id
 - 不要在异常日志中序列化整个请求体；其中可能有 API Key、Prompt 或文档内容。
 - 不要把真实 `local.service_conf.yaml` 提交到 Git。
 - 不要用文件名作为 Document、MinIO 对象和 Chunk 的唯一关联依据。
-- 不要向前端返回 `TenantLLM.api_key`、内部连接串或堆栈。
+- 普通业务接口应避免返回模型 API Key、内部连接串或堆栈；实例编辑接口当前涉及凭据返回，应检查其认证、归属校验和调用方，避免扩散完整响应。
 
 ## 15. 调试清单
 
