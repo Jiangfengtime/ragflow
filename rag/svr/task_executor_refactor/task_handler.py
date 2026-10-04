@@ -203,6 +203,7 @@ class TaskHandler:
             return
 
         # 在任何昂贵操作前检查取消标记；处理中各阶段还会重复检查，以便尽快停止并清理。
+        # 调用的是task_service.has_canceled方法, 等价于: bool(REDIS_CONN.get(f"{task_id}-cancel"))
         if ctx.has_canceled_func(task_id):
             ctx.progress_cb(-1, msg="Task has been canceled.")
             return
@@ -584,9 +585,9 @@ class TaskHandler:
         # 6. 最后一个分页 Task 执行文档级收尾，然后由外层对 Redis 消息 XACK。
 
         # File2DocumentService 将 doc_id 转换成对象存储 bucket/object key。
-        # 此处读取的是上传阶段保存的完整原文件；Chunk 文本不从 MinIO 读取。
+        # 此处读取的是上传阶段保存的完整原文件；Chunk 文本不从 MinIO 读取, 获取docId对应的知识库id和location。
         bucket, name = File2DocumentService.get_storage_address(doc_id=ctx.doc_id)
-        binary = await self._get_storage_binary(bucket, name)
+        binary = await self._get_storage_binary(bucket, name) # 用 kb_id 作 bucket、document.location 作对象 key，从 MinIO 读取原文件的二进制内容，返回值 binary 不是文件元数据。
         if binary is None:
             raise FileNotFoundError(f"Can not find file <{ctx.name}> from minio. Could you try it again.")
         # build_chunks 返回的是尚未生成向量、尚未写入 ES 的内存对象。

@@ -1393,7 +1393,7 @@ def _apply_overlap_unconditional(chunks, overlapped_percent):
             out.append(c)
     return out
 
-
+# 是正文按分隔符和 token 目标实际合并成 Chunk 的核心。其他解析策略有各自的 chunk()
 def naive_merge(sections: str | list, chunk_token_num=128, delimiter="\n。；！？", overlapped_percent=0, strategy=MergeStrategy.OVER_CAP):
     """Split sections into chunks. Chunking contract: see ``merge_paragraphs`` (refs #17799)."""
     if not sections:

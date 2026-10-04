@@ -265,8 +265,11 @@ class OpenAIEmbed(Base):
         self.base_url = ensure_v1(base_url)
         self.client = OpenAI(api_key=key, base_url=self.base_url)
         self.model_name = model_name
-
+    # 负责真正向模型服务发送一次 Embedding 请求
     def _call(self, batch):
+        # 用 self.client.embeddings.create(...) 将一批文本 batch 发往配置的 base_url，指定 self.model_name。
+        # 按响应中的 index 排序，取出每条文本对应的向量。
+        # 返回 (向量列表, 消耗的 token 数)。
         res = self.client.embeddings.create(input=batch, model=self.model_name, encoding_format="float", extra_body={"drop_params": True})
         return [d.embedding for d in _sorted_by_index(res.data)], total_token_count_from_response(res)
 

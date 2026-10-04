@@ -646,7 +646,7 @@ def cancel_all_task_of(doc_id):
         except Exception as e:
             logging.exception(e)
 
-
+# 判断任务取消是看redis中是否有task-cancel的key, 如果有则表示已取消
 def has_canceled(task_id):
     try:
         if REDIS_CONN.get(f"{task_id}-cancel"):

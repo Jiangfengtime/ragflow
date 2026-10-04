@@ -86,6 +86,7 @@ async def run_chunking(
     try:
         # 表格解析允许知识库级字段角色配置覆盖文档配置；普通文档通常保持原 parser_config。
         # 合并表解析器配置
+
         parser_config = merge_table_parser_config_from_kb(ctx.raw_task)
 
         chunking_wait_started_at = timer()

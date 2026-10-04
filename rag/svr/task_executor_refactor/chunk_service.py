@@ -127,102 +127,132 @@ class ChunkService:
             ctx: TaskContext 包含任务配置和执行资源。"""
         self._task_context = ctx
 
+    # 80 分钟超时保护仅在 ENABLE_TIMEOUT_ASSERTION 开启时由装饰器实际执行。
     @timeout(60 * 80, 1)
     async def build_chunks(
         self,
         storage_binary: bytes,  # 从对象存储读取的完整原文件二进制。
-        on_chunking_start=None,  # 取得 Chunk 并发许可后的回调，用于排除排队耗时。
+        on_chunking_start=None,  # 获得解析并发许可后，回报等待时长给调用方。
     ) -> List[Dict[str, Any]]:
-        """从文档二进制构建块。
+        """把当前 Task 负责的文件页段解析为待 Embedding 的 Chunk 列表。
 
-        这是块构建的主要入口点。它精心策划：
-        1. File尺寸验证
-        2.解析器选择和分块（委托给chunk_builder）
-        3.轮廓提取（委托chunk_builder）
-        4.MinIO上传
-        5、后处理（委托chunk_post_processor）
+        输入是调用方已读取的完整原文件；解析器会收到当前 Task 的 ctx.from_page、
+        ctx.to_page 页/行范围。依次完成大小校验、解析与切块、补充 Chunk 身份信息
+        和图片引用，以及按配置提取关键词、问题、文档元数据和标签。
 
-        参数：
-            storage_binary：文档的二进制内容。
-
-        返回：
-            准备嵌入的块字典列表。"""
+        返回值仍是内存中的 Chunk 字典：这里不生成向量，也不写入普通 Chunk 检索
+        索引；但 Chunk 图片可能写入对象存储，大纲和文档级元数据可能写入独立的
+        文档元数据检索索引，进度回调或部分解析器也可能更新 MySQL 状态/配置。
+        """
+        # TaskContext 保存当前 Task 的文档、知识库、解析配置、页段和回调。
         ctx = self._task_context
-        # 验证文件大小
-        # 这里使用的是 MySQL 文档记录中的 size，不是重新计算 len(storage_binary)
+
+        # 用 MySQL Document.size（已包含在 ctx 中）校验，不重新计算 len(storage_binary)。
+        # 超限时标记失败并提前返回，后续解析、Embedding 和普通 Chunk 索引写入均不执行。
         if ctx.size > settings.DOC_MAXIMUM_SIZE:
             self._progress(prog=-1, msg="File size exceeds( <= %dMb )" % (int(settings.DOC_MAXIMUM_SIZE / 1024 / 1024)))
             self._task_context.recording_context.record("file_size_exceeded", True)
             return []
+        # recording_context 用于执行结果对比；默认生产模式 record() 不保存数据。
         ctx.recording_context.record("file_size_exceeded", False)
         ctx.recording_context.record("parser_id", ctx.parser_id)
 
-        # 获取解析器
-        # 根据 parser_id 选择解析器
+        # parser_id 是解析/切块策略，不等于文件后缀；例如 general 映射到 naive 模块。
+        # 返回的 chunker 实现 chunk()；实际解析发生在下方的 run_chunking 中。
         chunker = get_parser(ctx.parser_id)
 
-        # 记录配置进行比较
+        # 以下只是供 recording_context 对比的配置快照，不会作为参数直接传给解析器。
+        # 实际 parser_config 在 run_chunking 中生成；table 策略还会合并知识库配置。
+        # document.parser_config 是文件导入时knowledgebase.parser_config的快照信息
         chunk_config = {
+            # 文档采用的解析策略。[数据源: document.parser_id]
             "parser_id": ctx.parser_id,
+
+            # chunk_token_num、overlapped_percent、delimiter: document.parser_config 中对应的配置；未设置时使用代码中的默认值
+            # 目标 Chunk token 数。
             "chunk_token_num": ctx.parser_config.get("chunk_token_num", 128),
+            # 当前 Task 内 Chunk 的重叠比例。
             "overlapped_percent": normalize_overlapped_percent(ctx.parser_config.get("overlapped_percent", 0)),
+            # 文本分段标识符。
             "delimiter": ctx.parser_config.get("delimiter", "\n!?。；！？"),
+
+            # 起始结束页.[数据源: task 表]
+            # 起始页/行，0-based。
             "from_page": ctx.from_page,
+            # 结束页/行，不包含该位置。
             "to_page": ctx.to_page,
+
+            # 解析器使用的文档语言, [数据源: knowledgebase.language]
             "language": ctx.language,
+
+            # 尝试读取 document.parser_config["layout_recognizer"]
+            #  仅记录现有字段；实际解析以 parser_config 为准。
             "layout_recognizer": ctx.parser_config.get("layout_recognizer"),
         }
-        # 记录当前任务的 Chunk 配置, 不落地, 只用于对比
+        # 这份 chunk_config 不写 MySQL、对象存储或检索索引。
         ctx.recording_context.record("chunk_config", chunk_config)
 
-        # 调用 parser 模块的 chunk()。解析器是同步且可能消耗大量 CPU，因此 run_chunking
-        # 会在 chunk_limiter 保护下把它放入线程池。返回的 cks 只是内存中的原始 Chunk。
+        # 实际执行文件解析和切块的入口
+        # 等待 chunk_limiter 后，在线程池调用同步的 chunker.chunk()；on_chunking_start
+        # 只回报等待许可的时间。当前 Task 的页/行范围会透传给解析器。
+        # cks 是内存中的原始结果，通常已有正文、分词、页码，尚未补稳定 Chunk ID。
         cks = await run_chunking(chunker, storage_binary, ctx, on_chunking_start)
 
-        # 记录原始块
+        # 保存原始解析结果供对比，不代表已经写入普通 Chunk 检索索引。
         self._task_context.recording_context.record("raw_chunks", cks)
 
-        # PDF parser 可能把目录临时放在首个 Chunk 的 __outline__ 中；这里取出并写入
-        # MySQL 文档元数据，避免 __outline__ 作为普通 Chunk 字段进入 ES。
-        # 摘录大纲（委托）
+        # PDF 解析器可能在首块的 __outline__ 中附带目录；取出后尝试更新独立的文档
+        # 元数据检索索引（不是 MySQL Document 字段），避免临时字段进入普通 Chunk。
         await extract_outline(cks, ctx)
 
-        # 给每个 Chunk 补充 doc_id/kb_id、稳定 Chunk ID 和时间字段；如果 Chunk 携带图片，
-        # 图片写入对象存储，Chunk 中只保留可用于反查图片的 img_id。
+        # 为每块补 doc_id/kb_id、由正文和 doc_id 计算的稳定 ID、创建时间等字段。
+        # 如带可编码图片，则写入对象存储并回填 img_id；纯文本块不上传图片。
         docs = await self._prepare_docs_and_upload(cks)
 
-        # 准备后记录文档
+        # docs 已可作为 Embedding 输入，但此时仍没有向量，也未写入普通 Chunk 索引。
         self._task_context.recording_context.record("docs_after_prep", docs)
 
-        # 以下后处理均发生在 Embedding 之前，因为 important_kwd/question_kwd/tag_kwd 等字段
-        # 既会参与最终 ES 文档，也可能影响后续文本拼接与查询排序。是否执行由 parser_config 控制。
-        # 后处理（委托给chunk_post_processor）
+        # 富化步骤按配置开启：关键词、问题和标签直接补在内存 docs 上，随 Chunk 在
+        # 后续 insert_chunks 中写入检索存储；文档级元数据则写独立索引。
+        # auto_keywords > 0 时按 Chunk 提取关键词：先查缓存，必要时调用 Chat 模型。
         if ctx.parser_config.get("auto_keywords", 0):
             await extract_keywords(docs, ctx)
+        # important_kwd/important_tks 分别保存关键词及检索分词；列表仅用于对比记录。
         keywords = [d for d in docs if d.get("important_kwd")]
         self._task_context.recording_context.record("keywords_extracted", keywords)
 
+        # auto_questions > 0 时为各 Chunk 生成可匹配的问题及分词，仍只修改内存对象；
+        # 后续 Embedding 可能优先使用这些问题文本。
         if ctx.parser_config.get("auto_questions", 0):
             await generate_questions(docs, ctx)
+        # question_kwd/question_tks 后续随普通 Chunk 写入检索索引。
         questions = [d for d in docs if d.get("question_kwd")]
         self._task_context.recording_context.record("questions_generated", questions)
 
+        # 同时启用元数据且配置了自定义/内建字段时，才执行文档级元数据处理。
+        # generate_metadata 汇总每块临时的 metadata_obj，删除这些临时字段后写入
+        # 独立的文档元数据索引；内建字段（如文件名、更新时间）也写入同一索引。
         if ctx.parser_config.get("enable_metadata", False) and (ctx.parser_config.get("metadata") or ctx.parser_config.get("built_in_metadata")):
             await generate_metadata(docs, ctx)
             apply_built_in_metadata(ctx)
+        # metadata_obj 在 generate_metadata 内通常已删除，因此此列表通常为空。
         metadata_list = [d for d in docs if d.get("metadata_obj")]
         self._task_context.recording_context.record("metadata_list_generated", metadata_list)
 
+        # 配置了标签知识库时，先匹配已有标签，未命中时可能调用 Chat 模型补标签。
         if ctx.kb_parser_config.get("tag_kb_ids", []):
             await apply_tags(docs, ctx)
+        # TAG_FLD 是 Chunk 的标签字段；这里只筛选出来供执行结果对比。
         tags_applied = [d for d in docs if d.get(TAG_FLD)]
         self._task_context.recording_context.record("tags_applied", tags_applied)
 
-        # 记录最终块
+        # 返回前记录最终 Chunk 快照及 ID 数量；默认生产模式下 record() 不保存数据。
         self._task_context.recording_context.record("final_chunks", docs)
         final_chunk_ids = [c.get("id") for c in docs if isinstance(c, dict) and "id" in c]
         self._task_context.recording_context.record("final_chunk_ids_count", len(final_chunk_ids))
 
+        # 调用方随后执行 embed_chunks 生成向量，再由 insert_chunks 持久化普通 Chunk；
+        # 若这里返回空列表，则由调用方处理“未生成 Chunk”的分支。
         return docs
 
     async def _prepare_docs_and_upload(self, cks: List[Dict]) -> List[Dict]:
@@ -287,7 +317,7 @@ class ChunkService:
     # =========================================================================
     # 插入 Service 方法（从 insert_service.py 合并）
     # =========================================================================
-
+    # insert_chunks() 将 Chunk 的文本、检索字段和 Embedding 向量，通过 [`settings.docStoreConn.insert()` 写入检索存储。你当前配置使用 Elasticsearch，所以实际写入 ES 索引
     async def insert_chunks(
         self,
         task_id: str,
@@ -467,6 +497,7 @@ class ChunkService:
             # 可识别已完成部分；若 checkpoint 写库失败，则删除本轮已插入 Chunk 保持一致性。
             if is_last_batch or batch_end - last_checkpoint >= checkpoint_batches * doc_bulk_size:
                 chunk_ids = [chunk["id"] for chunk in chunks[:batch_end]]
+                # 更新chunk_ids
                 if not await self._update_task_chunk_ids(task_id, chunk_ids):
                     # 失败回滚
                     await self._rollback_insertion(task_tenant_id, task_dataset_id, chunk_ids)

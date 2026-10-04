@@ -28,10 +28,12 @@ def _knowledgebase_service_cls():
 
     return KnowledgebaseService
 
-
+# 当 parser_id == "table" 时，它以 document.parser_config 为基础，逐个检查知识库配置中的这三个键；
+# 哪个键存在，就用知识库的值覆盖文档中的同名键，不要求三个键同时存在。其他配置项保持文档原值，合并结果仅用于本次解析，不写回数据库。
 def merge_table_parser_config_from_kb(task: dict) -> dict:
     """Merge dataset-level table parser keys into document parser_config (see build_chunks)."""
     pc = task.get("parser_config") or {}
+    # parser_id = "table" 表示这份文档选择了表格解析/切块策略
     if task.get("parser_id", "").lower() != "table" or not task.get("kb_parser_config"):
         return pc
     out = dict(pc)

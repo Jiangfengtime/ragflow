@@ -258,6 +258,7 @@ async def collect():
     if msg.get("doc_id", "") in [GRAPH_RAPTOR_FAKE_DOC_ID, CANVAS_DEBUG_DOC_ID]:
         task = msg
         if task["task_type"] in PIPELINE_SPECIAL_PROGRESS_FREEZE_TASK_TYPES:
+            # 根据taskId 和 docId查询task信息[联表查询: task + document + knowledgebase]
             task = TaskService.get_task(msg["id"], msg["doc_ids"])
             if task:
                 task["doc_id"] = msg["doc_id"]
@@ -268,6 +269,7 @@ async def collect():
     else:
         # 普通解析消息只携带轻量任务信息；以 task.id 查询 MySQL，补齐 tenant、KB、
         # 文档位置、parser_config、Embedding 模型等真正执行解析所需的数据。
+        # 根据taskId 查询task信息[联表查询: task + document + knowledgebase]
         task = TaskService.get_task(msg["id"])
 
     if task:

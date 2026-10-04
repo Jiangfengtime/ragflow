@@ -481,6 +481,7 @@ class DocumentService(CommonService):
         # 删除块映像（非关键，记录并继续）
         try:
             if chunk_index_exists:
+                # delete_chunk_images(doc, tenant_id) 清理的是解析后各 Chunk 关联的图片对象
                 cls.delete_chunk_images(doc, tenant_id)
         except Exception as e:
             logging.warning(f"Failed to delete chunk images for document {doc.id}: {e}")

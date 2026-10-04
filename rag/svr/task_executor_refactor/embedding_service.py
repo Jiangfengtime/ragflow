@@ -77,6 +77,7 @@ class EmbeddingService:
         # 与正文向量加权合并，使检索同时保留文件名和正文语义。
         tk_count = 0
         if len(titles) > 0 and len(titles) == len(contents):
+            # 批量调用 embedding_model.encode()，组合文件名与正文向量，再把向量写入内存 Chunk 的 q_<维度>_vec 字段。
             async with self._task_context.embed_limiter:
                 vts, c = await thread_pool_exec(embedding_model.encode, titles[0:1])
             tts = np.tile(vts[0], (len(contents), 1))

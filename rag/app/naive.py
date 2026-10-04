@@ -1004,51 +1004,64 @@ def load_from_xml_v2(baseURI, rels_item_xml):
                 continue
             srels._srels.append(_SerializedRelationship(baseURI, rel_elm))
     return srels
-
-
+# general 对应的chunk
+# binary 是从 MinIO 读取的整个原文件的字节内容，不是指定页段的文件内容。
+# from_page/to_page 与完整 binary 一起传给解析器；以默认 DeepDOC PDF 解析器为例，它打开完整 PDF 后，再通过 pdf.pages[from_page:to_page] 选择本 Task 要处理的页（结束页不包含）
 def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang="Chinese", callback=None, **kwargs):
+    """按 general/naive 策略解析原文件，并返回尚未生成向量的 Chunk 字典列表。
+
+    filename 决定文件类型；binary 是原文件内容。PDF 解析器会接收当前 Task 的
+    [from_page, to_page) 范围，但具体是否裁页取决于所选实现。lang 用于分词和
+    解析器语言；callback 由 Worker 传入以报告进度；kwargs 包含 parser_config、
+    tenant_id、kb_id 等上下文。返回值只在内存中，尚未生成 Embedding。
     """
-    Supported file formats are docx, pdf, excel, txt.
-    This method apply the naive ways to chunk files.
-    Successive text will be sliced into pieces using 'delimiter'.
-    Next, these successive pieces are merge into chunks whose token number is no more than 'Max token number'.
-    """
+    # 收集文档中的超链接；链接内容解析出的 Chunk 最后并入当前结果。
     urls = set()
     url_res = []
 
+    # 语言缺省为中文；parser_config 决定解析器、分隔符及目标 Chunk 大小。
     lang = lang or "Chinese"
-    is_english = lang.lower() == "english"  # is_english(cks)
+    # 向下游分词/Chunk 构造函数传递是否为英文的标记。
+    is_english = lang.lower() == "english"
+    # 只有完全未传 parser_config 时使用这里的整套默认值；已传字典的缺失键在各分支单独取默认值。
     parser_config = kwargs.get("parser_config", {"chunk_token_num": 512, "delimiter": "\n!?。；！？", "layout_recognize": "DeepDOC", "analyze_hyperlink": True})
 
+    # children_delimiter 是主 Chunk 生成后的二次拆分规则；先还原转义字符。
     child_deli = (parser_config.get("children_delimiter") or "").encode("utf-8").decode("unicode_escape").encode("latin1").decode("utf-8")
+    # 反引号包裹的多字符分隔符按整体匹配，其余字符逐个组成正则分隔规则。
     cust_child_deli = re.findall(r"`([^`]+)`", child_deli)
     child_deli = "|".join(re.sub(r"`([^`]+)`", "", child_deli))
     if cust_child_deli:
+        # 长串优先匹配，避免短串截断同一位置的长分隔符。
         cust_child_deli = sorted(set(cust_child_deli), key=lambda x: -len(x))
         cust_child_deli = "|".join(re.escape(t) for t in cust_child_deli if t)
         child_deli += cust_child_deli
 
+    # Markdown 有独立的合并流程；表格/图片上下文窗口用于给媒体块补相邻正文。
     is_markdown = False
     table_context_size = max(0, int(parser_config.get("table_context_size", 0) or 0))
     image_context_size = max(0, int(parser_config.get("image_context_size", 0) or 0))
 
+    # 基础字段会复制到每个 Chunk：原文件名、标题粗粒度/细粒度分词。
     doc = {"docnm_kwd": filename, "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename))}
     doc["title_sm_tks"] = rag_tokenizer.fine_grained_tokenize(doc["title_tks"])
+    # res 保存当前文件解析出的 Chunk；pdf_parser 后续用于裁图和提取位置。
     res = []
     pdf_parser = None
     section_images = None
 
+    # 只在顶层文件提取嵌入附件，子文件不再递归扫描，避免重复处理。
     is_root = kwargs.get("is_root", True)
     embed_res = []
     if is_root:
-        # Only extract embedded files at the root call
         embeds = []
         if binary is not None:
+            # 从原始字节中提取嵌入文件，不是从 MinIO 再读取一次。
             embeds = extract_embed_file(binary)
         else:
             raise Exception("Embedding extraction from file path is not supported.")
 
-        # Recursively chunk each embedded file and collect results
+        # 每个附件也走本方法，但标记 is_root=False；单个附件失败不终止主文件。
         for embed_filename, embed_bytes in embeds:
             try:
                 sub_res = chunk(embed_filename, binary=embed_bytes, lang=lang, callback=callback, is_root=False, **kwargs) or []
@@ -1060,8 +1073,10 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                     callback(0.05, error_msg)
                 continue
 
+    # DOCX 走专用合并器，处理完后直接返回；此分支也未使用 from_page/to_page。
     if re.search(r"\.docx$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
+        # 配置允许时，抓取 DOCX 超链接指向的网页并作为额外内容解析。
         if parser_config.get("analyze_hyperlink", False) and is_root:
             urls = extract_links_from_docx(binary)
             for index, url in enumerate(urls):
@@ -1069,23 +1084,25 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                 if not html_bytes:
                     continue
                 try:
+                    # URL 后缀可识别时直接按其类型解析。
                     sub_url_res = chunk(url, html_bytes, callback=callback, lang=lang, is_root=False, **kwargs)
                 except Exception as e:
                     logging.info(f"Failed to chunk url in registered file type {url}: {e}")
+                    # 原 URL 的解析失败时，改用 HTML 文件名重试。
                     sub_url_res = chunk(f"{index}.html", html_bytes, callback=callback, lang=lang, is_root=False, **kwargs)
                 url_res.extend(sub_url_res)
 
-        # fix "There is no item named 'word/NULL' in the archive", referring to https://github.com/python-openxml/python-docx/issues/1105#issuecomment-1298075246
+        # 修正 python-docx 读取含无效 word/NULL 关系的文档时可能抛出的异常。
         _SerializedRelationships.load_from_xml = load_from_xml_v2
 
-        # sections = (text, image, tables)
+        # 解析 DOCX 的正文、图片和表格，并规范化可能存在的 RTL 表现形式字符。
         sections = Docx()(filename, binary)
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
 
-        # chunks list[dict]
-        # images list - index of image chunk in chunks
+        # 依据目标 token 数和分隔符合并 DOCX 块；images 标识需增强的图片块下标。
         chunks, images = naive_merge_docx(sections, int(parser_config.get("chunk_token_num", 128)), parser_config.get("delimiter", "\n!?。；！？"), table_context_size, image_context_size)
 
+        # 有视觉模型等配置时，为图片块补充图像理解内容。
         vision_figure_parser_docx_wrapper_naive(
             chunks=chunks,
             idx_lst=images,
@@ -1097,41 +1114,45 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         callback(0.8, "Finish parsing.")
         st = timer()
 
+        # 将 DOCX 块转成检索字段，再并入附件和链接块；本分支不会应用 overlapped_percent。
         res.extend(doc_tokenize_chunks_with_images(chunks, doc, is_english, child_delimiters_pattern=child_deli, language=lang))
         logging.info("naive_merge({}): {}".format(filename, timer() - st))
         res.extend(embed_res)
         res.extend(url_res)
         return res
 
+    # PDF 先选择版面解析器，再把正文与表格分别转换成 Chunk。
     elif re.search(r"\.pdf$", filename, re.IGNORECASE):
+        # layout_recognize 可以是内置解析器名称，也可以是租户配置的模型 ID。
         layout_recognize_raw = parser_config.get("layout_recognize", "DeepDOC")
         tenant_id = kwargs.get("tenant_id")
         if tenant_id and isinstance(layout_recognize_raw, str):
             try:
+                # 将模型 ID 还原为带供应商信息的组合名称，供分发器识别。
                 layout_recognize_raw = get_composite_model_name_by_id(layout_recognize_raw)
             except LookupError:
+                # 普通解析器名称或无法解析的 ID 原样交给分发器处理。
                 pass
-        # Skip the local normalize_layout_recognizer() call — the dispatcher
-        # does it internally on the layout_recognize_override argument, so a
-        # second call here just discards the parsed model_name and breaks the
-        # @mineru/@paddleocr/@opendataloader/@somark composite-name wiring
-        # (CodeRabbit review #5 on #17114).
+        # 分发器内部负责规范化名称；这里不重复规范化，以免丢失模型名称和供应商后缀。
         opendataloader_llm_name = kwargs.pop("opendataloader_llm_name", None)
-        # Pass the resolved layout_recognize (after get_composite_model_name_by_id
-        # turned a TenantModel UUID into a "<model>@<instance>@<provider>" form)
-        # so the dispatch can extract the right parser_model_name.
+        # 得到实际 PDF 解析函数、解析器名称及其可能依赖的模型配置。
         parser, name, layout_recognizer, opendataloader_llm_name, parser_model_name = _dispatch_pdf_parser(
             parser_config,
             opendataloader_llm_name,
             layout_recognize_override=layout_recognize_raw,
         )
 
+        # 可选：提取 PDF 中的超链接，网页内容会在正文切块后另行解析。
         if parser_config.get("analyze_hyperlink", False) and is_root:
             urls = extract_links_from_pdf(binary)
         callback(0.1, "Start to parse.")
         if name == "mineru":
+            # general 策略下的 MinerU 使用 naive 解析模式。
             kwargs["parse_method"] = "naive"
 
+        # 真正执行 PDF 解析：sections 为正文及位置，tables 为表格/图片结果。
+        # from_page/to_page 传给选中的解析器；具体是否裁页由该解析器实现决定。
+        # 多种 *_llm_name 参数共用已解析的模型名称，由选中的解析器读取对应项。
         sections, tables, pdf_parser = parser(
             filename=filename,
             binary=binary,
@@ -1147,11 +1168,15 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             mistral_ocr_llm_name=parser_model_name,
             **kwargs,
         )
+        # 统一处理阿拉伯语等 RTL 字形，避免后续分词保留表现形式字符。
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
 
+        # 当前页段没有可解析的正文或表格，则直接返回空列表（附件结果也不追加）。
         if not sections and not tables:
             return []
 
+        # 可选：为 PDF 表格/图片附上邻近正文；实际窗口长度只取 image_context_size。
+        # 仅 table_context_size 非零而 image_context_size 为零时，调用不会增加上下文。
         if table_context_size or image_context_size:
             tables = append_context2table_image4pdf(
                 sections,
@@ -1160,44 +1185,52 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                 section_page_offset=from_page if name == "mineru" else 0,
             )
 
+        # 对特定外部解析器，非正数 token 目标表示不再把输出段合并成较大正文块。
+        # 这里直接修改传入的 parser_config 字典，后面的合并逻辑会读取新值。
         if name in ["tcadp", "docling", "mineru", "paddleocr", "opendataloader", "somark", "mistral ocr"]:
             if int(parser_config.get("chunk_token_num", 0)) <= 0:
                 parser_config["chunk_token_num"] = 0
 
+        # 表格/图片先独立转成检索 Chunk；正文 sections 稍后进入通用合并流程。
         res = tokenize_table(tables, doc, is_english, language=lang)
         callback(0.8, "Finish parsing.")
 
+    # CSV/XLS/XLSX 在 general 策略下使用通用表格读取，不等于专门的 table 解析策略。
     elif re.search(r"\.(csv|xlsx?)$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
 
-        # Check if tcadp_parser is selected for spreadsheet files
+        # 配置选择 TCADP 时走外部表格解析器，否则使用默认 ExcelParser。
         layout_recognizer = parser_config.get("layout_recognize", "DeepDOC")
         if layout_recognizer == "TCADP Parser":
             table_result_type = parser_config.get("table_result_type", "1")
             markdown_image_response_type = parser_config.get("markdown_image_response_type", "1")
             tcadp_parser = TCADPParser(table_result_type=table_result_type, markdown_image_response_type=markdown_image_response_type)
+            # 依赖不可用时报告失败并返回空结果。
             if not tcadp_parser.check_installation():
                 callback(-1, "TCADP parser not available. Please check Tencent Cloud API configuration.")
                 return res
 
-            # Determine file type based on extension
+            # TCADP 接口通过 file_type 区分 Excel 与 CSV。
             file_type = "XLSX" if re.search(r"\.xlsx?$", filename, re.IGNORECASE) else "CSV"
 
+            # 解析出正文和表格；表格立即转成 Chunk，正文留待后续合并。
             sections, tables = tcadp_parser.parse_pdf(filepath=filename, binary=binary, callback=callback, output_dir=os.environ.get("TCADP_OUTPUT_DIR", ""), file_type=file_type)
             sections = _normalize_section_text_for_rtl_presentation_forms(sections)
             parser_config["chunk_token_num"] = 0
             res = tokenize_table(tables, doc, is_english, language=lang)
             callback(0.8, "Finish parsing.")
         else:
-            # Default DeepDOC parser
+            # 默认读取工作表内容；html4excel 将表格组织成 HTML 片段。
             excel_parser = ExcelParser()
             if parser_config.get("html4excel"):
                 sections = [(_, "") for _ in excel_parser.html(binary, 12) if _]
+                # HTML 表格片段保持独立，不再合并多个片段。
                 parser_config["chunk_token_num"] = 0
             else:
                 sections = [(_, "") for _ in excel_parser(binary) if _]
             sections = _normalize_section_text_for_rtl_presentation_forms(sections)
 
+    # 纯文本与代码文件先由 TxtParser 拆出文本段，再进入公共合并流程。
     elif re.search(r"\.(txt|py|js|java|c|cpp|h|php|go|ts|sh|cs|kt|sql)$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
         sections = TxtParser()(filename, binary, parser_config.get("chunk_token_num", 128), parser_config.get("delimiter", "\n!?;。；！？"))
@@ -1205,9 +1238,11 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         logging.info("TxtParser produced %d sections for %s", len(sections), filename)
         callback(0.8, "Finish parsing.")
 
+    # Markdown 保留段落对应的图片，后面使用专用的按 section 合并流程。
     elif re.search(r"\.(md|markdown|mdx)$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
         markdown_parser = Markdown(int(parser_config.get("chunk_token_num", 128)))
+        # sections 是正文段，tables 是独立媒体结果，section_images 与正文段下标对齐。
         sections, tables, section_images = markdown_parser(
             filename,
             binary,
@@ -1217,8 +1252,10 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         )
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
 
+        # 标记走 Markdown 专用合并器，而非下方普通 naive_merge。
         is_markdown = True
 
+        # 尝试获取租户默认视觉模型；缺失时继续解析文本，不中断导入。
         try:
             vision_model_config = get_tenant_default_model_by_type(kwargs["tenant_id"], LLMType.VISION)
             vision_model = LLMBundle(kwargs["tenant_id"], vision_model_config, lang=lang)
@@ -1228,14 +1265,14 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             vision_model = None
 
         if vision_model:
-            # Process images for each section
+            # 对每个带图片的正文段，用视觉模型生成图像描述并追加到段落文本。
             for idx, (section_text, _) in enumerate(sections):
                 images = []
                 if section_images and len(section_images) > idx and section_images[idx] is not None:
                     images.append(section_images[idx])
 
                 if images and len(images) > 0:
-                    # If multiple images found, combine them using concat_img
+                    # 同一段的多张图片先拼接，再作为一次视觉解析的输入。
                     combined_image = reduce(concat_img, images) if len(images) > 1 else images[0]
                     if section_images:
                         section_images[idx] = combined_image
@@ -1249,19 +1286,23 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                         **kwargs,
                     )
                     boosted_figures = markdown_vision_parser(callback=callback)
+                    # 图像描述并入正文，后续同正文一起参与切块与检索分词。
                     sections[idx] = (section_text + "\n\n" + "\n\n".join([fig[0][1] for fig in boosted_figures]), sections[idx][1])
 
         else:
             logging.warning("No visual model detected. Skipping figure parsing enhancement.")
 
+        # 仅顶层调用提取 Markdown 中的链接；是否抓取还要看 analyze_hyperlink。
         if parser_config.get("hyperlink_urls", False) and is_root:
             for idx, (section_text, _) in enumerate(sections):
                 soup = markdown_parser.md_to_html(section_text)
                 hyperlink_urls = markdown_parser.get_hyperlink_urls(soup)
                 urls.update(hyperlink_urls)
+        # 独立表格/图片结果先进入 res；Markdown 正文随后单独合并。
         res = tokenize_table(tables, doc, is_english, language=lang)
         callback(0.8, "Finish parsing.")
 
+    # HTML/EPUB/JSON 系列先解出文本段，随后统一使用 naive_merge。
     elif re.search(r"\.(htm|html)$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
         chunk_token_num = int(parser_config.get("chunk_token_num", 128))
@@ -1270,6 +1311,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
         callback(0.8, "Finish parsing.")
 
+    # EPUB 解析结果也包装为 (文本, 位置) 形式；此处位置为空。
     elif re.search(r"\.epub$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
         chunk_token_num = int(parser_config.get("chunk_token_num", 128))
@@ -1278,6 +1320,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
         callback(0.8, "Finish parsing.")
 
+    # JSON/JSONL/LDJSON 按专用解析器提取文本，而非直接以原始 JSON 字符串切块。
     elif re.search(r"\.(json|jsonl|ldjson)$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
         chunk_token_num = int(parser_config.get("chunk_token_num", 128))
@@ -1286,6 +1329,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
         callback(0.8, "Finish parsing.")
 
+    # 旧版 .doc 依赖 tika；不可用或未提取到正文时返回空列表。
     elif re.search(r"\.doc$", filename, re.IGNORECASE):
         callback(0.1, "Start to parse.")
 
@@ -1296,6 +1340,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             logging.warning(f"tika not available: {e}. Unsupported .doc parsing for {filename}.")
             return []
 
+        # Tika 从内存中的文件字节提取文本，按换行转成 sections。
         binary = BytesIO(binary)
         doc_parsed = tika_parser.from_buffer(binary)
         if doc_parsed.get("content", None) is not None:
@@ -1309,47 +1354,59 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             logging.warning(error_msg)
             return []
     else:
+        # general 解析器不支持当前后缀；此处不负责转换文件类型。
         raise NotImplementedError("file type not supported yet(pdf, xlsx, doc, docx, txt supported)")
 
+    # 文件类型解析完毕；以下将 sections 合并成 Chunk，并记录合并耗时。
     st = timer()
+    # 重叠比例归一化到 0～90；它只作用于本次调用生成的相邻 Chunk。
     overlapped_percent = normalize_overlapped_percent(parser_config.get("overlapped_percent", 0))
 
+    # Markdown 的段落与图片需要保持对齐，因此不走普通 naive_merge。
     if is_markdown:
         merged_chunks = []
         merged_images = []
+        # chunk_token_num 是合并的目标值，不保证最终 Chunk 严格小于它。
         chunk_limit = max(0, int(parser_config.get("chunk_token_num", 128)))
 
+        # 累积当前 Chunk 的正文、估计 token 数及合并后的图片。
         current_text = ""
         current_tokens = 0
         current_image = None
 
         for idx, sec in enumerate(sections):
+            # Markdown 解析器的每个 section 通常是 (文本, 位置信息)。
             text = sec[0] if isinstance(sec, tuple) else sec
             sec_tokens = num_tokens_from_string(text)
             sec_image = section_images[idx] if section_images and idx < len(section_images) else None
 
-            # Don't finalize chunk if current_text is a short header (force merge with next section)
+            # 目标大小将被超过时，先封存旧 Chunk；短标题例外，尽量与后文同块。
             if current_text and not _is_short_header(current_text) and current_tokens + sec_tokens > chunk_limit:
                 merged_chunks.append(current_text)
                 merged_images.append(current_image)
+                # 从旧块尾部按字符比例取重叠文本，作为下一块的开头。
                 overlap_part = ""
                 if overlapped_percent > 0:
                     overlap_len = int(len(current_text) * overlapped_percent / 100)
                     if overlap_len > 0:
                         overlap_part = current_text[-overlap_len:]
+                # 有重叠时保留原图片引用；无重叠时从空块开始。
                 current_text = overlap_part
                 current_tokens = num_tokens_from_string(current_text)
                 current_image = current_image if overlap_part else None
 
+            # 将当前 section 拼到正在构造的 Chunk。
             if current_text:
                 current_text += "\n" + text
             else:
                 current_text = text
             current_tokens += sec_tokens
 
+            # 当前 section 带图时，把它与本 Chunk 已收集的图片拼接。
             if sec_image:
                 current_image = concat_img(current_image, sec_image) if current_image else sec_image
 
+        # 循环结束后，最后一个尚未封存的 Chunk 也要加入结果。
         if current_text:
             merged_chunks.append(current_text)
             merged_images.append(current_image)
@@ -1357,49 +1414,57 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         chunks = merged_chunks
         has_images = merged_images and any(img is not None for img in merged_images)
 
+        # 转换为含正文、分词等字段的字典；有图片时同时附上图片对象。
         if has_images:
             res.extend(tokenize_chunks_with_images(chunks, doc, is_english, merged_images, child_delimiters_pattern=child_deli, language=lang))
         else:
             res.extend(tokenize_chunks(chunks, doc, is_english, pdf_parser, child_delimiters_pattern=child_deli, language=lang))
     else:
+        # 对非 Markdown 格式，空图片列表视为纯文本，不进入图文合并分支。
         if section_images:
             if all(image is None for image in section_images):
                 section_images = None
 
         if section_images:
+            # 图文路径：同步合并文本和图片，保持两者下标一一对应。
             chunks, images = naive_merge_with_images(sections, section_images, int(parser_config.get("chunk_token_num", 128)), parser_config.get("delimiter", "\n!?。；！？"), overlapped_percent)
             res.extend(tokenize_chunks_with_images(chunks, doc, is_english, images, child_delimiters_pattern=child_deli, language=lang))
         else:
+            # 纯文本路径：按 delimiter 拆段、按 token 软目标合并。
+            # 普通路径可加入重叠；反引号自定义分隔符则每段独立成块，不应用重叠。
             chunks = naive_merge(sections, int(parser_config.get("chunk_token_num", 128)), parser_config.get("delimiter", "\n!?。；！？"), overlapped_percent)
 
+            # 每个块生成正文和检索分词；PDF 还可从版面位置裁图、记录页码。
             res.extend(tokenize_chunks(chunks, doc, is_english, pdf_parser, child_delimiters_pattern=child_deli, language=lang))
 
+    # 解析链接内容并追加为额外 Chunk；仅顶层且启用 analyze_hyperlink 时执行。
     if urls and parser_config.get("analyze_hyperlink", False) and is_root:
         for index, url in enumerate(urls):
             html_bytes, metadata = extract_html(url)
             if not html_bytes:
                 continue
             try:
+                # 先按 URL 的文件名/后缀选择子解析器。
                 sub_url_res = chunk(url, html_bytes, callback=callback, lang=lang, is_root=False, **kwargs)
             except Exception as e:
                 logging.info(f"Failed to chunk url in registered file type {url}: {e}")
+                # 原 URL 的解析失败时，按 HTML 文档名重试。
                 sub_url_res = chunk(f"{index}.html", html_bytes, callback=callback, lang=lang, is_root=False, **kwargs)
             url_res.extend(sub_url_res)
 
     logging.info("naive_merge({}): {}".format(filename, timer() - st))
 
+    # 附件和超链接不是当前正文 sections 的一部分，在末尾合并进返回列表。
     if embed_res:
         res.extend(embed_res)
     if url_res:
         res.extend(url_res)
-    # if table_context_size or image_context_size:
-    #    attach_media_context(res, table_context_size, image_context_size)
 
-    # Attach PDF outline as transient metadata on the first chunk.
-    # task_executor.py will extract and persist it as document metadata.
+    # PDF 目录临时放在首个 Chunk 的 __outline__；后续任务流程会提取并单独保存。
     if res and pdf_parser and getattr(pdf_parser, "outlines", None):
         res[0]["__outline__"] = [{"title": title, "depth": depth} for title, depth, *_ in pdf_parser.outlines]
 
+    # 这里仅返回内存字典；稳定 Chunk ID、Embedding 和检索索引写入都在调用方。
     return res
 
 

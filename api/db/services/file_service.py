@@ -720,8 +720,10 @@ class FileService(CommonService):
                 # 先写 Document 元数据，再建立文件管理记录和 File2Document 关系。
                 # 关联依赖显式 ID/字段而非文件名：Document.id=doc_id，Document.kb_id/location
                 # 指向对象存储，File2Document.file_id/document_id 连接文件树与知识库文档。
-                DocumentService.insert(doc) # 通过 Peewee 把 doc 字典写入 MySQL 的 document 表，保存文档 ID、知识库 ID、文件名、MinIO 位置、大小、解析配置等元数据。
-                FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id) # 把刚创建的文档接入文件管理器的目录树，不是再次上传文件。
+                # 通过 Peewee 把 doc 字典写入 MySQL 的 document 表，保存文档 ID、知识库 ID、文件名、MinIO 位置、大小、解析配置等元数据。
+                DocumentService.insert(doc)
+                # 把刚创建的文档接入文件管理器的目录树，不是再次上传文件。[落地file和file2document表]
+                FileService.add_file_from_kb(doc, kb_folder["id"], kb.tenant_id)
                 logger.info(
                     "文档存储记录已创建 文档ID=%s 知识库ID=%s 存储位置=%s 文件类型=%s 文件大小=%d 是否有缩略图=%s",
                     doc_id,
@@ -828,7 +830,7 @@ class FileService(CommonService):
                     deleted_file_count = FileService.filter_delete([File.source_type == FileSource.KNOWLEDGEBASE, File.id == f2d[0].file_id])
                 File2DocumentService.delete_by_document_id(doc_id)
                 if deleted_file_count > 0:
-                    settings.STORAGE_IMPL.rm(b, n)
+                    settings.STORAGE_IMPL.rm(b, n) # 删除原文件
 
                 doc_parser = doc.parser_id
                 if doc_parser == ParserType.TABLE:
