@@ -2011,7 +2011,7 @@ async def get_artifact(filename):
     except Exception as e:
         return server_error_response(e)
 
-
+# 文档启用和文档禁用
 @manager.route("/datasets/<dataset_id>/documents/batch-update-status", methods=["POST"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs

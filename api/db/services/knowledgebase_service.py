@@ -58,7 +58,7 @@ def _kb_embedding_base_name(kb, resolved_names) -> str:
         return _base_model_name(embd_id)
     return ref
 
-
+# 用于在跨知识库检索前，检查所选知识库的 Embedding 模型配置是否一致。
 def validate_dataset_embedding_models(kbs):
     """Validate that all given datasets use the same embedding model (or all use none).
 

@@ -50,7 +50,7 @@ class FulltextQueryer(QueryBase):
     # 6. 构造带权重的 query_string 文本。
     def question(self, txt, tbl="qa", min_match: float = 0.6):
         original_query = txt
-        txt = self.add_space_between_eng_zh(txt)
+        txt = self.add_space_between_eng_zh(txt) # 在中英文相邻的位置插入空格，方便后续分词。
 
         # 从查询中去除 Infinity ESCAPABLE 字符。
         #
@@ -62,10 +62,10 @@ class FulltextQueryer(QueryBase):
             " ",
             rag_tokenizer.tradi2simp(rag_tokenizer.strQ2B(txt.lower())),
         ).strip()
-        if not rag_tokenizer.tokenize(txt).strip():
+        if not rag_tokenizer.tokenize(txt).strip(): # 对文本分词，返回空格分隔的字符串
             return None, []
         otxt = txt
-        txt = self.rmWWW(txt)
+        txt = self.rmWWW(txt) # 用于去掉问题中的疑问词、语气词和部分英文停用词，突出检索主题
 
         # 英文/非中文分支：按词构造带权 term，并额外提升相邻双词短语，减少只命中散词的结果。
         if not self.is_chinese(txt):

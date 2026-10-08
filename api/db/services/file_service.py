@@ -516,6 +516,7 @@ class FileService(CommonService):
     @classmethod
     @DB.connection_context()
     def add_file_from_kb(cls, doc, kb_folder_id, tenant_id):
+        # 如果已经构建了file 和 file2 Document, 就不再构建
         for _ in File2DocumentService.get_by_document_id(doc["id"]):
             return
         file = {
@@ -699,7 +700,7 @@ class FileService(CommonService):
                 doc = {
                     "id": doc_id,
                     "kb_id": kb.id,
-                    # 判断解析器
+                    # 判断解析器[图片 → picture; 音频 → audio; .ppt/.pptx/.pages → presentation; .msg/.eml → email; 其他文件 → 使用知识库的 kb.parser_id]
                     "parser_id": self.get_parser(filetype, filename, kb.parser_id),
                     "pipeline_id": kb.pipeline_id,
                     # Chunk 大小、重叠率、页码范围等。

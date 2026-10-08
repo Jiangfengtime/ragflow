@@ -1473,7 +1473,7 @@ async def search_datasets(tenant_id: str, req: dict):
     search_id = req.get("search_id", "")
     search_config = {}
     chat_mdl = None
-    if search_id:
+    if search_id: # search_id 是已保存的搜索应用 ID，对应 MySQL search 表记录，不是一次查询的流水号，也不是知识库 ID。
         search_detail = SearchService.get_detail(search_id)
         if not search_detail:
             logging.warning("搜索配置未找到：搜索应用ID=%s", search_id)
@@ -1593,7 +1593,7 @@ async def search_datasets(tenant_id: str, req: dict):
         doc_ids=local_doc_ids,  # 可选，只检索指定文档
         knn_top_k=knn_top_k,  # ES KNN 最多召回多少个向量候选
         knn_num_candidates=knn_num_candidates,  # ES 每个分片内部用于近似搜索的候选规模
-        rerank_mdl=rerank_mdl,  # 可选的专用重排模型
+        rerank_mdl=rerank_mdl,  # 传入 rerank_mdl：使用专用模型打分，并结合其他分数。
         rank_feature=labels,  # 标签特征
         trace_id=search_id,  # 仅用于串联当前检索配置/日志，方便排查一次检索链路
         must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"},  # 排除某些类型的 Chunk

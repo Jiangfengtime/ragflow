@@ -221,7 +221,7 @@ class Dealer:
             3.构造ES query_string 查询、
             4.设置minimum_should_match
             """
-            matchText, keywords = self.qryr.question(qst, min_match=(0.3 if min_match else 0))
+            matchText, keywords = self.qryr.question(qst, min_match=(0.3 if min_match else 0)) # 把问题转换成全文检索条件，为 BM25 召回做准备
             if emb_mdl is None:
                 matchExprs = [matchText] if matchText else []
                 res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
