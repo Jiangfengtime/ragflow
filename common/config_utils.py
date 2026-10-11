@@ -51,7 +51,7 @@ def conf_realpath(conf_name):
     conf_path = f"conf/{conf_name}"
     return os.path.join(get_project_base_directory(), conf_path)
 
-
+# 读取配置信息: 用local.service_conf.yaml 覆盖 service_conf.yaml的配置
 def read_config(conf_name=SERVICE_CONF):
     local_config = {}
     local_path = conf_realpath(f"local.{conf_name}")

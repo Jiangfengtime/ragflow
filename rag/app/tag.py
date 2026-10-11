@@ -120,7 +120,7 @@ def chunk(filename, binary=None, lang="Chinese", callback=None, **kwargs):
     raise NotImplementedError("Excel, csv(txt) format files are supported.")
 
 # 本质上是：**根据问题从标签知识库中推断相关标签，再提升具有相同标签的候选 Chunk 排名。**它不调用 LLM，也不会直接过滤 Chunk。
-def label_question(question, kbs):
+def label_question(question, kbs): # 为检索问题生成标签及权重，用于增强结果排序。
     from api.db.services.knowledgebase_service import KnowledgebaseService
     from rag.graphrag.utils import get_tags_from_cache, set_tags_to_cache
 

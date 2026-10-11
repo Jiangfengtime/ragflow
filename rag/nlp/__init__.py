@@ -1207,23 +1207,21 @@ def _compute_overlap_prefix(prev_text, overlapped_percent):
     index is computed against the visible characters, matching the existing
     behaviour of ``RAGFlowPdfParser.remove_tag`` callers above.
     """
+    # PDF 位置标记不属于正文，先移除，避免把坐标字符串当成重叠内容。
     visible = re.sub(r"@@[\t0-9.-]+?##", "", prev_text or "")
     if not visible:
         return "", 0
+    # 按字符而非 Token 截取尾部：100 字符、20% 重叠时，从下标 80 开始取。
     overlap_start = int(len(visible) * (100 - overlapped_percent) / 100.0)
     overlap_text = visible[overlap_start:]
     return overlap_text, num_tokens_from_string(overlap_text)
 
 
 class MergeStrategy(Enum):
-    """How ``merge_paragraphs`` groups delimiter-split paragraphs into chunks.
+    """段落合并策略，不负责强制切开单个超长段落。
 
-    ``OVER_CAP`` (default) greedily accumulates adjacent paragraphs while the
-    projected total stays within ``token_size``; when the next paragraph would
-    exceed ``token_size``, it is still merged (one boundary overflow is allowed),
-    then the chunk is closed. ``UNDER_CAP`` only merges when the projected total
-    still fits the soft ``token_size`` target and never overflows. Switching
-    strategy is a single enum value — no logic change elsewhere.
+    OVER_CAP：当前累计值尚未超过阈值时继续追加，允许这次追加越过阈值。
+    UNDER_CAP：仅当追加后的累计值不超过目标时合并；超长单段仍独立保留。
     """
 
     UNDER_CAP = "under_cap"
@@ -1231,26 +1229,24 @@ class MergeStrategy(Enum):
 
 
 def _merge_paragraph_groups(paragraphs, token_size, strategy, size, overlapped_percent=0):
-    """Return index groups of ``paragraphs`` per ``strategy``.
+    """按合并策略返回段落下标分组，不直接返回拼接后的文本。
 
-    ``paragraphs`` are already split on the delimiter and contain no delimiter
-    text. No atom-split is ever performed: a paragraph larger than ``token_size``
-    becomes its own chunk. ``size(paragraph)`` returns the token count.
-
-    The OVER_CAP merge decision uses the overlap-scaled threshold
-    ``token_size * (100 - overlapped_percent) / 100`` so the grouping reserves
-    room for the unconditional overlap prefix (unified JSON strategy). At
-    ``overlapped_percent == 0`` the threshold equals ``token_size``, so grouping
-    is identical to the prior ``prev_t + cur_t <= token_size`` rule — including
-    the one-boundary-overflow close — keeping ``merge_paragraphs``/``txt_parser``
-    output unchanged.
+    paragraphs：已经按分隔符拆好的正文列表；不会在此处再拆单个段落。
+    token_size：目标大小，单段超过它时仍完整保留为独立组。
+    strategy：OVER_CAP 为默认软目标策略，UNDER_CAP 为追加前检查策略。
+    size：计数函数，调用 size(段落) 得到该段大小，通常估计 Token 数。
+    overlapped_percent：只缩小 OVER_CAP 分组阈值，不在本函数内拼接重叠。
+    返回例：[[0, 1], [2]] 表示前两段一组，第三段单独一组。
     """
+    # cap 判断“单段是否过长”；threshold 判断“已有段落组是否该封存”。
+    # 重叠比例非零时缩小分组阈值，为稍后拼接的重叠文本预留空间，但并非硬限制。
     cap = token_size
     threshold = token_size * (100 - overlapped_percent) / 100.0
     n = len(paragraphs)
-    groups = []
+    groups = []  # 保存段落下标分组，例如 [[0, 1, 2], [3]]，此处尚未拼接正文。
 
     if strategy == MergeStrategy.UNDER_CAP:
+        # 先判断“加入下一段后的大小”，与下方默认策略的判断时机不同。
         cur = []
         cur_tokens = 0
         for i in range(n):
@@ -1259,6 +1255,7 @@ def _merge_paragraph_groups(paragraphs, token_size, strategy, size, overlapped_p
                 cur = [i]
                 cur_tokens = size(p)
                 if cur_tokens > cap:
+                    # 即使选择 UNDER_CAP，单个超长段落也不会被强制截断。
                     groups.append(cur)
                     cur = []
                     cur_tokens = 0
@@ -1267,6 +1264,7 @@ def _merge_paragraph_groups(paragraphs, token_size, strategy, size, overlapped_p
                 cur.append(i)
                 cur_tokens += size(p)
             else:
+                # 下一段放不下：先保存旧组，再把下一段作为新组的第一段。
                 groups.append(cur)
                 cur = [i]
                 cur_tokens = size(p)
@@ -1278,61 +1276,45 @@ def _merge_paragraph_groups(paragraphs, token_size, strategy, size, overlapped_p
             groups.append(cur)
         return groups
 
-    # OVER_CAP (default): a new chunk starts when the current chunk's running
-    # token sum exceeds the (overlap-scaled) ``threshold``; an over-budget unit
-    # always stands alone (#17799). The scaled threshold reserves room for the
-    # unconditional overlap prefix (unified JSON strategy). At overlap=0 the
-    # threshold equals ``token_size``, so grouping is identical to the prior
-    # ``prev_t + cur_t <= token_size`` rule (incl. the one-boundary-overflow
-    # close).
+    # 默认路径只保存段落下标，保持原顺序；PDF 坐标和图片由后续重建函数处理。
     cur, cur_t = [], 0
     for i in range(n):
-        pt = size(paragraphs[i])
+        pt = size(paragraphs[i])  # 当前段 Token 估计值；cur_t 是已有组的累计值。
         if pt > cap:
+            # 单段就超过目标：先封存已有组，再让本段单独成块，不截断、不拆段。
             if cur:
                 groups.append(cur)
             groups.append([i])
             cur, cur_t = [], 0
             continue
         if not cur:
+            # 新组至少接收一段，再从后续迭代判断是否需要关闭。
             cur, cur_t = [i], pt
             continue
         if cur_t > threshold:
+            # 判断的是加入当前段“之前”的累计值，而不是 cur_t + pt。
+            # 已超过阈值时，封存旧组，并用当前段开启新组。
             groups.append(cur)
             cur, cur_t = [i], pt
         else:
+            # 累计值未超过（包括恰好等于）阈值时，继续追加完整段落。
+            # 例：目标 512、无重叠，200+200 后仍追加 200，得到 600；
+            # 下一段到来才封存这组，所以 512 是软目标而不是截断长度。
             cur.append(i)
             cur_t += pt
     if cur:
+        # 最后一组没有“下一段”触发封存，需要在循环结束时补入结果。
         groups.append(cur)
     return groups
 
 
 def merge_paragraphs(paragraphs, token_size, strategy=MergeStrategy.OVER_CAP, size=None, overlapped_percent=0):
-    """Group delimiter-split ``paragraphs`` into chunks using ``strategy``.
+    """把已拆好的段落分组，返回二维段落列表，不拼接正文、不处理 PDF 位置。
 
-    Pure function: no pos / PDF coordinate handling, no atom-split. Returns a
-    list of chunks, each a list of the original paragraph strings (order and
-    identity preserved). ``token_size`` is a soft target; see ``MergeStrategy``.
-
-    ``size`` defaults to ``num_tokens_from_string`` and is resolved at call
-    time (not captured at definition) so tests can monkeypatch the tokenizer
-    deterministically via ``rag.nlp.num_tokens_from_string``.
-
-    Chunking contract (refs #17799)
-    --------------------------------
-    * **Delimiter is a chunk boundary.** The delimiter text specified by the
-      user never enters a chunk. ``naive_merge`` / ``naive_merge_with_images``
-      split every section on the delimiter (except the empty-delimiter
-      size-only mode) so boundary text cannot leak into a chunk.
-    * **``token_size`` is a soft target + merge strategy.** There is no
-      atom-split: a paragraph larger than ``token_size`` stands alone as its own
-      chunk and is truncated later by the model layer.
-    * **Default strategy is ``OVER_CAP``.** A migration that needs the old
-      strict behaviour can opt into ``UNDER_CAP``.
-    * **``OVER_CAP`` has no hard cap** (the model layer truncates oversize
-      units); **``UNDER_CAP`` enforces a strict cap** and never overflows
-      ``token_size``.
+    例：输入 [A, B, C]、下标分组 [[0, 1], [2]]，返回 [[A, B], [C]]。
+    默认计数函数为 num_tokens_from_string，调用时读取，便于测试替换。
+    两种策略都保留超长单段，不能将 UNDER_CAP 理解成强制裁切的硬上限。
+    本函数只分组；分隔符拆分和重叠拼接由调用方负责。
     """
     if size is None:
         size = num_tokens_from_string
@@ -1341,14 +1323,16 @@ def merge_paragraphs(paragraphs, token_size, strategy=MergeStrategy.OVER_CAP, si
 
 
 def _reconstruct_text_chunk(paragraphs, group):
-    """Rebuild a chunk string from a ``merge_paragraphs`` group, re-attaching
-    ``pos`` (PDF coordinate tag) per the historical caller convention: append
-    ``pos`` to a paragraph when it is not already present in the running text.
+    """按 group 下标顺序，把 (正文, 位置标记) 段落重建成一条 Chunk 字符串。
+
+    位置标记暂时随正文传递，供后面的 PDF 裁图、页码/坐标提取使用；
+    tokenize_chunks() 中再由 PDF 解析器移除标记，得到检索正文。
     """
     text = ""
     for idx in group:
         ptext, ppos = paragraphs[idx]
         new_text = text + ptext
+        # 同一 section 拆出的多段可能带同一位置标记，只补尚未出现的标记。
         if ppos and ptext.find(ppos) < 0 and new_text.find(ppos) < 0:
             new_text += ppos
         text = new_text
@@ -1356,9 +1340,7 @@ def _reconstruct_text_chunk(paragraphs, group):
 
 
 def _reconstruct_image_chunk(paragraphs, group):
-    """Like ``_reconstruct_text_chunk`` but also concatenates the image of every
-    merged paragraph (mirrors the previous ``concat_img`` dedupe behaviour).
-    """
+    """重建图文块，输入为 (正文, 位置标记, 图片)，返回 (合并正文, 合并图片)。"""
     text = ""
     image = None
     for idx in group:
@@ -1368,26 +1350,30 @@ def _reconstruct_image_chunk(paragraphs, group):
             new_text += ppos
         text = new_text
         if pimg is not None:
+            # 第一次直接保存图片，后续按 concat_img 的规则拼接，而非丢弃前图。
             image = pimg if image is None else concat_img(image, pimg)
     return text, image
 
 
 def _apply_overlap_unconditional(chunks, overlapped_percent):
-    """Prepend an overlap prefix from the previous chunk at each new-chunk
-    boundary, UNCONDITIONALLY when ``overlapped_percent > 0`` (unified JSON
-    strategy). The prefix is never dropped for not fitting the budget, so
-    context is continuous across every chunk boundary; a chunk may therefore
-    exceed ``chunk_token_num`` by up to the overlap amount.
+    """为相邻文本块添加前块尾部，不因超出 Token 预算而丢弃重叠。
+
+    例：前块正文 ABCDE、比例 40%，下一块正文 XYZ，拼接后为 DEXYZ。
+    原 chunks 列表不在此处原地修改，结果累积到新的 out 列表。
     """
     if overlapped_percent <= 0:
         return chunks
     out = []
     for i, c in enumerate(chunks):
         if i == 0:
+            # 第一块没有前块，不添加重叠。
             out.append(c)
             continue
+        # 使用已经写入 out 的上一块（可能也包含它自己的重叠），不是原始 chunks[i-1]。
+        # 只处理本次调用内的相邻块，不会自动连接不同 Task 的页段。
         overlap_text, _ = _compute_overlap_prefix(out[-1], overlapped_percent)
         if overlap_text:
+            # 不再检查 Token 预算，直接拼接，所以最终块可能进一步超出目标。
             out.append(overlap_text + c)
         else:
             out.append(c)
@@ -1395,24 +1381,27 @@ def _apply_overlap_unconditional(chunks, overlapped_percent):
 
 # 是正文按分隔符和 token 目标实际合并成 Chunk 的核心。其他解析策略有各自的 chunk()
 def naive_merge(sections: str | list, chunk_token_num=128, delimiter="\n。；！？", overlapped_percent=0, strategy=MergeStrategy.OVER_CAP):
-    """Split sections into chunks. Chunking contract: see ``merge_paragraphs`` (refs #17799)."""
+    """把解析器的 sections 转为文本 Chunk：分隔符拆段 → Token 分组 → 重建 → 重叠。
+
+    sections 可为字符串、字符串列表或 (正文, PDF 位置标记) 列表。
+    chunk_token_num 是合并目标；普通段落先拆再合并，不保证每个分隔点最终都是块边界。
+    反引号自定义分隔符走独立分段分支，绕过 Token 合并和后续重叠。
+    """
     if not sections:
         return []
     if isinstance(sections, str):
         sections = [sections]
     if isinstance(sections[0], str):
         sections = [(s, "") for s in sections]
-    # Normalize line endings so delimiter ``\n`` matches ``\r\n`` and standalone ``\r``.
+    # 统一 Windows 的 CRLF 和单独 CR，保证配置中的换行分隔符能匹配。
     sections = [(normalize_text_newlines(s), pos) for s, pos in sections]
 
-    # Parse the delimiter field once, via the canonical helper (#17383).
-    # `has_custom` means the field contains a backtick-wrapped token — the
-    # historical signal that chunk_token_num should be bypassed: each segment is
-    # its own chunk.
+    # 把配置转换为分隔符列表，再编译为正则；不是直接把用户配置当作正则执行。
+    # has_custom 判断是否包含反引号包裹的分隔串，这会切换到独立成块模式。
     parsed_dels = parse_delimiter_field(delimiter)
     has_custom = has_wrapped_delimiter(delimiter)
     if has_custom:
-        # Custom delimiters ignore chunk_token_num: each segment is its own chunk.
+        # 自定义分隔模式直接返回每个片段，下面的公共分组和重叠代码不会执行。
         custom_pattern = compile_delimiter_pattern(parsed_dels)
         cks = []
         for sec, pos in sections:
@@ -1425,33 +1414,33 @@ def naive_merge(sections: str | list, chunk_token_num=128, delimiter="\n。；�
                 text = "\n" + sub_sec
                 local_pos = pos
                 if num_tokens_from_string(text) < 8:
+                    # 很短的自定义片段不附加位置标记，正文片段本身仍保留。
                     local_pos = ""
                 if local_pos and text.find(local_pos) < 0:
                     text += local_pos
                 cks.append(text)
         return cks
 
-    # Default path: split every section on the delimiter into paragraphs (no
-    # delimiter text), then group paragraphs with the chosen merge strategy.
-    # No atom-split is performed: a paragraph larger than ``chunk_token_num``
-    # becomes its own chunk; the model layer truncates oversize units.
-    #
-    # A section is split on the delimiter whenever one is present -- even when
-    # the whole section already fits ``chunk_token_num``. The delimiter is a
-    # chunk boundary and its text must never leak into a chunk; only the
-    # empty-delimiter (size-only) mode below skips splitting.
+    # 普通路径：即使 section 小于目标，也先按分隔符拆段，再决定哪些段合并。
+    # 分隔符是“候选段落边界”，不是每一个分隔点最终都生成一个独立 Chunk。
     dels = compile_delimiter_pattern(parsed_dels)
-    paragraphs = []  # list of (text, pos)
+    paragraphs = []  # (正文片段, 位置标记) 列表；尚未分组，也未生成 ES 记录。
     for sec, pos in sections:
         if not dels:
+            # 没有分隔规则时，完整 section 是一个不可再切分的段落单元。
             paragraphs.append(("\n" + sec, pos))
             continue
         for sub_sec in re.split(r"(%s)" % dels, sec, flags=re.DOTALL):
+            # 正则外面的括号使结果包含分隔符本身；下一行排除它和空片段。
             if not sub_sec or re.fullmatch(dels, sub_sec):
                 continue
+            # 新增换行用于后续文本重建；不是把原始匹配到的分隔符放回去。
+            # 拆出的片段沿用 section 的位置，后面重建时再附加位置标记。
             paragraphs.append(("\n" + sub_sec, pos))
 
+    # 分组只统计正文字符串（含新增换行），不把位置标记纳入该次 Token 估计。
     groups = _merge_paragraph_groups([p[0] for p in paragraphs], chunk_token_num, strategy, num_tokens_from_string, overlapped_percent)
+    # 将每组下标对应的正文顺序拼接，并附加需要保留的 PDF 位置标记。
     cks = [_reconstruct_text_chunk(paragraphs, g) for g in groups]
     logging.debug("naive_merge: %d sections -> %d chunks (delimiter=%r)", len(sections), len(cks), delimiter)
     return _apply_overlap_unconditional(cks, overlapped_percent)

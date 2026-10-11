@@ -1458,7 +1458,7 @@ async def search_datasets(tenant_id: str, req: dict):
     kbs = KnowledgebaseService.get_by_ids(kb_ids)
     if not kbs:
         return False, "Datasets not found!"
-    # 检查这些知识库使用的 Embedding 模型是否兼容,
+    # 检查这些知识库使用的 Embedding 模型是否兼容, 比较的是基础模型名
     # 跨知识库检索时，向量必须处于相同的向量空间，通常要求使用相同的 Embedding 模型。
     err = validate_dataset_embedding_models(kbs)
     if err:

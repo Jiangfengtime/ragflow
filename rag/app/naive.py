@@ -148,7 +148,7 @@ def _dispatch_pdf_parser(parser_config: dict, opendataloader_llm_name=None, layo
     as an IMAGE2TEXT vision model and crash.
     """
     raw_layout_recognize = layout_recognize_override if layout_recognize_override is not None else parser_config.get("layout_recognize", "DeepDOC")
-    layout_recognizer, parser_model_name = normalize_layout_recognizer(raw_layout_recognize)
+    layout_recognizer, parser_model_name = normalize_layout_recognizer(raw_layout_recognize) # 把原始配置拆成“解析器类型”和“模型完整名称”
     if layout_recognizer == "OpenDataLoader" and parser_model_name:
         opendataloader_llm_name = parser_model_name
 
@@ -840,12 +840,22 @@ class Markdown(MarkdownParser):
         return []
 
     def extract_image_urls_with_lines(self, text):
+        """返回图片引用及其所在行，例如 [{"url": "a.png", "line": 3}]。
+
+        text 是表格处理后的 Markdown，不一定与原始文件保持相同行号。
+        先逐行扫描，再用 HTML 解析补充跨行 img；此处不下载图片。
+        后续 __call__ 按 section 的起止行号关联引用，再调用 load_images_from_urls。
+        """
+        # 提取 ![说明](地址) 中的地址；不是完整 Markdown 语法解析器，
+        # 不能假定引用式图片、带复杂括号的地址等所有写法都能被识别。
         md_img_re = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
+        # 逐行扫描 src 属性，不检查它是否属于 img；后面的 HTML 补充阶段才限定 img。
         html_img_re = re.compile(r'src=["\\\']([^"\\\'>\\s]+)', re.IGNORECASE)
         urls = []
-        seen = set()
+        seen = set()  # 以 (地址, 行号) 去重；同一图片在不同行出现可保留多个引用。
         lines = text.splitlines()
         for idx, line in enumerate(lines):
+            # enumerate 默认从 0 开始，输出行号与元素提取器的行号约定一致。
             for url in md_img_re.findall(line):
                 if (url, idx) not in seen:
                     urls.append({"url": url, "line": idx})
@@ -855,11 +865,13 @@ class Markdown(MarkdownParser):
                     urls.append({"url": url, "line": idx})
                     seen.add((url, idx))
 
-        # cross-line
+        # HTML 标签可能跨行，逐行正则不够，因此用 BeautifulSoup 再扫描 img 标签。
+        # 该阶段与正则阶段共享 seen，不会重复加入同地址、同行号的引用。
         try:
             from bs4 import BeautifulSoup
 
             soup = BeautifulSoup(text, "html.parser")
+            # 记录每个换行的字符下标，并追加文件末尾作为最后一行的右边界。
             newline_offsets = [m.start() for m in re.finditer(r"\n", text)] + [len(text)]
             for img_tag in soup.find_all("img"):
                 src = img_tag.get("src")
@@ -867,12 +879,15 @@ class Markdown(MarkdownParser):
                     continue
 
                 tag_str = str(img_tag)
+                # 将标签序列化后尝试定位；解析器可能调整属性顺序/引号，导致原文匹配失败。
                 pos = text.find(tag_str)
                 if pos == -1:
-                    # fallback
+                    # 回退到地址第一次出现的位置；仍找不到时按 0 处理。
+                    # 重复 URL 或标签被规范化时，这只是近似定位，并非可靠的源位置映射。
                     pos = max(text.find(src), 0)
                 line_no = 0
                 for i, off in enumerate(newline_offsets):
+                    # 找到第一个不小于 pos 的行尾，得到 0-based 行号。
                     if pos <= off:
                         line_no = i
                         break
@@ -880,9 +895,12 @@ class Markdown(MarkdownParser):
                     urls.append({"url": src, "line": line_no})
                     seen.add((src, line_no))
         except Exception as e:
+            # HTML 补充失败仍返回此前正则扫描的结果，不清空已收集引用。
             logging.error("Failed to extract image urls: {}".format(e))
             pass
 
+        # 返回的是地址字符串与行号；不是图片字节、图片对象或最终 Chunk。
+        # 此函数不保护代码围栏，因此代码示例中的图片语法也可能被扫描出来。
         return urls
 
     def load_images_from_urls(self, urls, cache=None):
@@ -950,19 +968,31 @@ class Markdown(MarkdownParser):
         return images, cache
 
     def __call__(self, filename, binary=None, separate_tables=True, delimiter=None, return_section_images=False):
-        """Parse markdown into text sections and optional standalone table chunks."""
+        """解析 Markdown 元素，返回中间段落，不在此处完成最终 Chunk 合并。
+
+        filename/binary：文件名及原文件字节；Worker 通常传入 binary。
+        separate_tables：是否将表格从正文分离；General 调用时为 False。
+        delimiter：传给元素提取器的分段规则，不是 PDF 页范围。
+        return_section_images：True 时返回与 sections 等长的图片列表。
+        返回 sections 为 [(文本, 空位置)]；tbls 为独立表格；
+        section_images[i] 对应 sections[i]，无图片时该项为 None。
+        """
         if binary is not None:
+            # 原文件先检测编码再解码；不是从 MinIO 重新下载，也不是只读取部分页。
             encoding = find_codec(binary)
             txt = binary.decode(encoding, errors="ignore")
         else:
             with open(filename, "r") as f:
                 txt = f.read()
 
+        # 表格处理
         remainder, tables = self.extract_tables_and_remainder(f"{txt}\n", separate_tables=separate_tables)
         parsing_text = remainder
         extractor = MarkdownElementExtractor(parsing_text)
-        image_refs = self.extract_image_urls_with_lines(parsing_text)
-        element_sections = extractor.extract_elements(delimiter, include_meta=True)
+        image_refs = self.extract_image_urls_with_lines(parsing_text) # 图片引用提取
+        # include_meta=True 保留每个元素的起止行号，用于关联图片引用。
+        # Debug 先看 element_sections：后续合并以这些元素为单元，不重新按 PDF 规则切段。
+        element_sections = extractor.extract_elements(delimiter, include_meta=True) # 正文元素拆分
 
         sections = []
         section_images = []
@@ -971,18 +1001,22 @@ class Markdown(MarkdownParser):
             content = element["content"]
             start_line = element["start_line"]
             end_line = element["end_line"]
+            # 按行号把图片 URL 分配到对应段落，避免把所有图片追加到文档末尾。
             urls_in_section = [ref["url"] for ref in image_refs if start_line <= ref["line"] <= end_line]
             imgs = []
             if urls_in_section:
-                imgs, image_cache = self.load_images_from_urls(urls_in_section, image_cache)
+                # 同次解析共享 URL 缓存；加载失败时仍可保留该元素的文本。
+                imgs, image_cache = self.load_images_from_urls(urls_in_section, image_cache) # 根据元素起止行号关联图片，并加载图片
             combined_image = None
             if imgs:
+                # 一个元素内多张图片先拼成一个对象，使图片与正文保持一对一索引关系。
                 combined_image = reduce(concat_img, imgs) if len(imgs) > 1 else imgs[0]
             sections.append((content, ""))
             section_images.append(combined_image)
 
         tbls = []
         if separate_tables:
+            # General 使用 separate_tables=False，不会在这里生成独立表格结果。
             for table in tables:
                 tbls.append(((None, markdown(table, extensions=["markdown.extensions.tables"])), ""))
         if return_section_images:
@@ -1039,8 +1073,8 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
 
     # Markdown 有独立的合并流程；表格/图片上下文窗口用于给媒体块补相邻正文。
     is_markdown = False
-    table_context_size = max(0, int(parser_config.get("table_context_size", 0) or 0))
-    image_context_size = max(0, int(parser_config.get("image_context_size", 0) or 0))
+    table_context_size = max(0, int(parser_config.get("table_context_size", 0) or 0)) # 表格周围的正文上下文窗口
+    image_context_size = max(0, int(parser_config.get("image_context_size", 0) or 0)) # 图片周围的正文上下文窗口
 
     # 基础字段会复制到每个 Chunk：原文件名、标题粗粒度/细粒度分词。
     doc = {"docnm_kwd": filename, "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename))}
@@ -1056,7 +1090,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
     if is_root:
         embeds = []
         if binary is not None:
-            # 从原始字节中提取嵌入文件，不是从 MinIO 再读取一次。
+            # 从原文件中提取嵌入的附件或对象
             embeds = extract_embed_file(binary)
         else:
             raise Exception("Embedding extraction from file path is not supported.")
@@ -1240,8 +1274,10 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
 
     # Markdown 保留段落对应的图片，后面使用专用的按 section 合并流程。
     elif re.search(r"\.(md|markdown|mdx)$", filename, re.IGNORECASE):
+        # 断点一：确认本次 parser_id 选中 General，且后缀实际进入 Markdown 分支。
+        # callback 仅报告阶段进度并检查取消，不负责启动解析。
         callback(0.1, "Start to parse.")
-        markdown_parser = Markdown(int(parser_config.get("chunk_token_num", 128)))
+        markdown_parser = Markdown(int(parser_config.get("chunk_token_num", 128))) # 表示 Chunk 的目标 Token 数
         # sections 是正文段，tables 是独立媒体结果，section_images 与正文段下标对齐。
         sections, tables, section_images = markdown_parser(
             filename,
@@ -1251,12 +1287,15 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             return_section_images=True,
         )
         sections = _normalize_section_text_for_rtl_presentation_forms(sections)
+        # 断点二：检查 sections 文本与 section_images 下标；这里尚未生成向量。
+        # 本分支未使用 from_page/to_page，因此不能按 PDF 页范围理解 Markdown 处理。
 
         # 标记走 Markdown 专用合并器，而非下方普通 naive_merge。
         is_markdown = True
 
         # 尝试获取租户默认视觉模型；缺失时继续解析文本，不中断导入。
         try:
+            # 视觉模型用于图片描述，不是后续正文 Embedding 模型或 Rerank 模型。
             vision_model_config = get_tenant_default_model_by_type(kwargs["tenant_id"], LLMType.VISION)
             vision_model = LLMBundle(kwargs["tenant_id"], vision_model_config, lang=lang)
             callback(0.2, "Visual model detected. Attempting to enhance figure extraction...")
@@ -1286,6 +1325,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                         **kwargs,
                     )
                     boosted_figures = markdown_vision_parser(callback=callback)
+                    # 外部视觉调用可能产生费用；无图的 section 不会进入此调用。
                     # 图像描述并入正文，后续同正文一起参与切块与检索分词。
                     sections[idx] = (section_text + "\n\n" + "\n\n".join([fig[0][1] for fig in boosted_figures]), sections[idx][1])
 
@@ -1294,6 +1334,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
 
         # 仅顶层调用提取 Markdown 中的链接；是否抓取还要看 analyze_hyperlink。
         if parser_config.get("hyperlink_urls", False) and is_root:
+            # 此处只收集 URL；函数末尾还需 analyze_hyperlink=True 才实际抓取链接正文。
             for idx, (section_text, _) in enumerate(sections):
                 soup = markdown_parser.md_to_html(section_text)
                 hyperlink_urls = markdown_parser.get_hyperlink_urls(soup)
@@ -1364,6 +1405,7 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
 
     # Markdown 的段落与图片需要保持对齐，因此不走普通 naive_merge。
     if is_markdown:
+        # 断点三：与普通 naive_merge 不同，这里先看“追加后是否超出”再决定封存旧块。
         merged_chunks = []
         merged_images = []
         # chunk_token_num 是合并的目标值，不保证最终 Chunk 严格小于它。
@@ -1378,10 +1420,14 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
             # Markdown 解析器的每个 section 通常是 (文本, 位置信息)。
             text = sec[0] if isinstance(sec, tuple) else sec
             sec_tokens = num_tokens_from_string(text)
+            # Token 是估计长度，不是字符数；当前估算累加未单独计入新拼接的换行。
             sec_image = section_images[idx] if section_images and idx < len(section_images) else None
 
             # 目标大小将被超过时，先封存旧 Chunk；短标题例外，尽量与后文同块。
             if current_text and not _is_short_header(current_text) and current_tokens + sec_tokens > chunk_limit:
+                # 空块直接接收第一个元素；短标题尽量跟正文一起保留。
+                # 示例：目标 512，元素大小 200/200/200，无重叠时先封存 400，再接收 200。
+                # 单个元素本身超过 512 仍完整保留，所以此处不是严格截断器。
                 merged_chunks.append(current_text)
                 merged_images.append(current_image)
                 # 从旧块尾部按字符比例取重叠文本，作为下一块的开头。
@@ -1393,6 +1439,8 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                 # 有重叠时保留原图片引用；无重叠时从空块开始。
                 current_text = overlap_part
                 current_tokens = num_tokens_from_string(current_text)
+                # 重叠先成为新块的初始正文并重新计数，再追加本轮元素。
+                # 本轮不会再次检查重叠 + 元素是否超限，因此仍可能超过目标。
                 current_image = current_image if overlap_part else None
 
             # 将当前 section 拼到正在构造的 Chunk。
@@ -1413,9 +1461,12 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
 
         chunks = merged_chunks
         has_images = merged_images and any(img is not None for img in merged_images)
+        # chunks[i] 和 merged_images[i] 始终对应；不能分别排序或过滤两个列表。
 
         # 转换为含正文、分词等字段的字典；有图片时同时附上图片对象。
         if has_images:
+            # 断点四：检查最终正文/图片列表；tokenize 构建检索字段并可拆子块。
+            # 此处仍不写 ES、不调用文本 Embedding，后续由 Worker 完成。
             res.extend(tokenize_chunks_with_images(chunks, doc, is_english, merged_images, child_delimiters_pattern=child_deli, language=lang))
         else:
             res.extend(tokenize_chunks(chunks, doc, is_english, pdf_parser, child_delimiters_pattern=child_deli, language=lang))

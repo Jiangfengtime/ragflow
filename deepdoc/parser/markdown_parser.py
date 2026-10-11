@@ -34,44 +34,52 @@ class RAGFlowMarkdownParser:
         self.chunk_token_num = int(chunk_token_num)
 
     def extract_tables_and_remainder(self, markdown_text, separate_tables=True):
-        tables = []
-        working_text = markdown_text
+        """处理 Markdown/HTML 表格，返回 (处理后的正文, 收集到的表格片段)。
 
-        # a fenced code block can legitimately contain a pipe table, e.g. docs that show
-        # markdown syntax. extracting it would strip the example out of the fence and
-        # re-emit it as a bogus table, leaving a hollow fence behind.
-        # MarkdownElementExtractor already shields fences (see _fenced_code_ranges), so
-        # keep table extraction consistent with it.
+        separate_tables=True：从正文移除识别出的表格，交由调用方独立处理。
+        separate_tables=False：保留表格，Markdown 表格会渲染为 HTML。
+        两种模式都会收集 tables；是否构造独立表格 Chunk 由调用方决定。
+        本函数不按 Token 切块、不生成向量，也不保证输出行号与原文件一致。
+        """
+        tables = []  # 收集各轮匹配到的片段，并非最终 Chunk 字典。
+        working_text = markdown_text  # 各轮转换后的正文，后续匹配基于最新内容。
+
+        # 第一步：找出 ``` 或 ~~~ 围栏代码区域，保护其中的表格语法示例。
+        # MULTILINE 让 ^/$ 按行匹配；DOTALL 让 .*? 跨行；未闭合围栏可匹配到末尾。
         fence_pattern = re.compile(
             r"^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^[ \t]{0,3}\1[ \t]*$|\Z)",
             re.MULTILINE | re.DOTALL,
         )
 
         def replace_tables_with_rendered_html(pattern, table_list, render=True):
+            # 公共替换器：按“未处理正文 + 当前表格处理结果”逐段重建字符串。
+            # last_end 是上一条已处理匹配的结束下标，不是行号。
             new_text = ""
             last_end = 0
+            # 前一轮替换会改变字符下标，每一轮都重新计算围栏位置。
             fenced_spans = [(m.start(), m.end()) for m in fence_pattern.finditer(working_text)]
             for match in pattern.finditer(working_text):
                 if any(start <= match.start() < end for start, end in fenced_spans):
-                    # inside a code fence: leave it in place. last_end is untouched, so
-                    # the block is copied through verbatim.
+                    # 不移动 last_end，后续正文切片会原样保留被跳过的代码示例。
                     logger.debug("markdown table pass: skipping match inside a code fence at %d", match.start())
                     continue
                 raw_table = match.group()
                 table_list.append(raw_table)
                 if separate_tables:
-                    # Skip this match (i.e., remove it)
+                    # 分离模式：保留表格之前的正文，用换行替代表格，避免两侧文本粘连。
                     new_text += working_text[last_end : match.start()] + "\n"
                 else:
-                    # Replace with rendered HTML
+                    # 保留模式：表格仍在原来的正文位置，但 Markdown 语法转成 HTML。
                     html_table = markdown(raw_table, extensions=["markdown.extensions.tables"]) if render else raw_table
                     new_text += working_text[last_end : match.start()] + html_table + "\n"
                 last_end = match.end()
+            # 补上最后一次匹配之后的正文；没有匹配时，这里保留整个输入。
             new_text += working_text[last_end:]
             return new_text
 
-        if "|" in markdown_text:  # for optimize performance
-            # Standard Markdown table
+        # 第二步：没有竖线时跳过 Markdown 表格扫描，不影响后面的 HTML 表格处理。
+        if "|" in markdown_text:
+            # 识别两侧有竖线的表格：表头 + 横线/冒号分隔行 + 数据行。
             border_table_pattern = re.compile(
                 r"""
                 (?:\n|^)
@@ -83,7 +91,7 @@ class RAGFlowMarkdownParser:
             )
             working_text = replace_tables_with_rendered_html(border_table_pattern, tables)
 
-            # Borderless Markdown table
+            # 再识别两侧不要求竖线的表格，例如 A | B；同样需要分隔行和数据行。
             no_border_table_pattern = re.compile(
                 r"""
                 (?:\n|^)
@@ -95,7 +103,8 @@ class RAGFlowMarkdownParser:
             )
             working_text = replace_tables_with_rendered_html(no_border_table_pattern, tables)
 
-        # Replace any TAGS e.g. <table ...> to <table>
+        # 第三步：清除这些 HTML 开始标签的属性，例如 <table class="x"> → <table>。
+        # 不只是 table，列表中的 div/td 等也会处理；代码围栏内部保持原样。
         TAGS = ["table", "td", "tr", "th", "tbody", "thead", "div"]
         table_with_attributes_pattern = re.compile(rf"<(?:{'|'.join(TAGS)})[^>]*>", re.IGNORECASE)
 
@@ -103,7 +112,7 @@ class RAGFlowMarkdownParser:
 
         def replace_tag(m):
             if any(start <= m.start() < end for start, end in tag_fenced_spans):
-                # an html example inside a fence keeps its attributes verbatim.
+                # HTML 代码示例保留属性，避免改写用户展示的源代码。
                 logger.debug("html tag pass: preserving tag inside a code fence at %d", m.start())
                 return m.group()
             tag_name = re.match(r"<(\w+)", m.group()).group(1)
@@ -111,8 +120,12 @@ class RAGFlowMarkdownParser:
 
         working_text = re.sub(table_with_attributes_pattern, replace_tag, working_text)
 
-        if "<table>" in working_text.lower():  # for optimize performance
-            # HTML table extraction - handle possible html/body wrapper tags
+        # 第四步：处理 HTML 表格，包含前面由 Markdown 渲染得到的表格。
+        # 因此保留模式的 tables 可能同时收集同一表格的 Markdown 和 HTML 表示，
+        # 不能把列表长度直接当成文档中独立表格的数量。
+        if "<table>" in working_text.lower():
+            # 支持 html/body 包裹、仅 body 包裹以及独立 table 三种形式。
+            # 正则还要求表格位于行首/行尾边界，不等于完整 HTML DOM 解析。
             html_table_pattern = re.compile(
                 r"""
             (?:\n|^)
@@ -134,6 +147,7 @@ class RAGFlowMarkdownParser:
             )
 
             def replace_html_tables():
+                # nonlocal 允许更新外层 working_text；重建规则与 Markdown 替换器相同。
                 nonlocal working_text
                 new_text = ""
                 last_end = 0
@@ -145,8 +159,10 @@ class RAGFlowMarkdownParser:
                     raw_table = match.group()
                     tables.append(raw_table)
                     if separate_tables:
+                        # 分离：正文移除，表格字符串已保存到 tables。
                         new_text += working_text[last_end : match.start()] + "\n"
                     else:
+                        # 保留：这里已经是 HTML，不需要再次调用 markdown() 渲染。
                         new_text += working_text[last_end : match.start()] + raw_table + "\n"
                     last_end = match.end()
                 new_text += working_text[last_end:]
@@ -154,6 +170,7 @@ class RAGFlowMarkdownParser:
 
             replace_html_tables()
 
+        # 返回的 working_text 后续交给元素提取器；此处尚未执行 Chunk 合并。
         return working_text, tables
 
 

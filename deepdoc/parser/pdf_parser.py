@@ -467,6 +467,7 @@ class RAGFlowPdfParser:
             return width - y, x
         return x, y
 
+    # 分析表格行列结构
     def _table_transformer_job(self, ZM, auto_rotate=True):
         """
         Process table structure recognition.
@@ -874,6 +875,7 @@ class RAGFlowPdfParser:
             self.mean_height[pagenum - 1] = np.median([b["bottom"] - b["top"] for b in bxs])
         self.boxes.append(bxs)
 
+    # 识别正文、标题、表格、图片等版面区域
     def _layouts_rec(self, ZM, drop=True):
         assert len(self.page_images) == len(self.boxes)
         self.boxes, self.page_layout = self.layouter(self.page_images, self.boxes, ZM, drop=drop)
@@ -1759,13 +1761,13 @@ class RAGFlowPdfParser:
             auto_rotate_tables = os.getenv("TABLE_AUTO_ROTATE", "true").lower() in ("true", "1", "yes")
 
         self.outlines = extract_pdf_outlines(fnm)
-        self.__images__(fnm, zoomin)
-        self._layouts_rec(zoomin)
-        self._table_transformer_job(zoomin, auto_rotate=auto_rotate_tables)
-        self._text_merge()
-        self._concat_downward()
+        self.__images__(fnm, zoomin) # 处理指定页段，页面渲染、文字/OCR及位置处理
+        self._layouts_rec(zoomin) # 识别正文、标题、表格、图片等版面区域
+        self._table_transformer_job(zoomin, auto_rotate=auto_rotate_tables) # 分析表格行列结构
+        self._text_merge() # 合并零散文字框
+        self._concat_downward() # 根据规则向下拼接正文块
         self._filter_forpages()
-        tbls = self._extract_table_figure(need_image, zoomin, return_html, False)
+        tbls = self._extract_table_figure(need_image, zoomin, return_html, False) # 提取表格、图片及位置
         return self.__filterout_scraps(deepcopy(self.boxes), zoomin), tbls
 
     def parse_into_bboxes(self, fnm, callback=None, zoomin=3, from_page=0, to_page=MAXIMUM_PAGE_NUMBER):
@@ -1824,7 +1826,7 @@ class RAGFlowPdfParser:
         start = timer()
         self._text_merge()
         self._concat_downward()
-        self._naive_vertical_merge(zoomin)
+        self._naive_vertical_merge(zoomin) # 进一步纵向合并正文
         if callback:
             callback(0.92, "Text merged ({:.2f}s)".format(timer() - start))
 
@@ -2095,6 +2097,7 @@ class VisionParser(RAGFlowPdfParser):
         self.vision_model = vision_model
         self.outlines = []
 
+    # 处理指定页段，页面渲染、文字/OCR及位置处理
     def __images__(self, fnm, zoomin=3, page_from=0, page_to=MAXIMUM_PAGE_NUMBER, callback=None):
         try:
             with sys.modules[LOCK_KEY_pdfplumber]:
